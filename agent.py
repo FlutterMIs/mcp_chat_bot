@@ -153,7 +153,9 @@ class Agent:
             plan = {"status": "execute", "mode": "data", "operation": "aggregate", "source_id": sid, "sheet_name": sheet,
                     **{k: args.get(k) for k in ("metric", "aggregation", "group_by", "filters", "date_column", "date_grain", "date_from", "date_to", "sort", "top_n")}}
             validate_plan(self.question, plan, s[sid])   # generic guards; raise → observation
-            res = self.tools.call("aggregate_source", {k: v for k, v in plan.items() if v is not None and k not in ("status", "mode", "operation")})
+            from periods import enforce_period
+            plan = enforce_period(plan, self.question, clamp_only=True)   # the step may look at a sub-period, never outside the asked one
+            res = self.tools.call("aggregate_source", {k: v for k, v in plan.items() if v is not None and k not in ("status", "mode", "operation", "period")})
             rid = self.store.put(enrich_result(res, plan), f"{plan.get('aggregation') or 'sum'} {plan['metric']}" + (f" by {plan['group_by']}" if plan.get("group_by") else ""), sid, sheet)
             return {"result_id": rid, **self.store.summary(rid)}
         if name == "query_data":

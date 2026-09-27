@@ -200,10 +200,40 @@ user (web / WhatsApp)
 
 ### Tests
 ```bash
-.venv/bin/python -m pytest tests                 # 145 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
+.venv/bin/python -m pytest tests                 # 243 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
 RUN_LIVE=1 .venv/bin/python -m pytest tests/test_live_analyst.py    # real LLM incl. multi-source agent case
 .venv/bin/python tests/golden_real_sheet.py      # 34 golden questions on the real sheet + website, incl. a cross-sheet agent case
 ```
+
+## Canonical periods & conversational follow-ups (2026-09-27)
+
+One resolver, `periods.resolve_date_expression(text, reference_date)`, produces every date range in the system. The
+understanding layer, the LLM planner (`sanitize_plan` overrides the planner's `date_from/date_to`), the agent loop (steps
+are clamped into the asked period), the state executor, charts, tables and answers all use the same result, so
+"last 2 months" cannot mean two different things on two paths. LLM-written dates never bypass it.
+
+| Expression (typed or voice, Hinglish or English) | reference 2026-09-27 → | period_type |
+|---|---|---|
+| last month · pichle mahine · previous month · "last moment" (STT slip) | 2026-08-01 → 2026-08-31 | previous_month |
+| this month · is mahine · MTD | 2026-09-01 → 2026-09-27 | current_month_to_date |
+| last 2 months · last two months · pichle do mahine · do mahine ka total | 2026-08-01 → 2026-09-27 (Aug + Sep to date) | last_n_calendar_months |
+| August · Aug 2026 · 2026-08 | 2026-08-01 → 2026-08-31 | calendar_month |
+| August September ka total aur August ka total | asks: Aug+Sep, Aug — every part is answered | explicit_months |
+
+Never `today - N*30 days`. Every result's plan carries `period` metadata (`date_expression`, `reference_date`,
+`period_type`, `periods[{label,start,end}]`), shown as `FinalResponse.period` / `date_range`.
+
+**Follow-ups modify the previous result** (`understanding.understand` + `analyst.understood_reply`): "total kar ke
+batao" / "sab mila ke" / "grand total" collapse a series into one scalar (SERIES → TOTAL, same source, period, filters,
+metric); "only total" / "bas total bata" also drop the calculation line; "month wise" / "customer wise" / "August ka?"
+/ "detail dikhao" / "top 10" keep the context and change one thing. Planner-made answers seed the same context
+(`seed_state`), so a follow-up after an LLM-planned question does not start from zero.
+
+**Simple question = simple answer:** "last 2 months ki sale kitni hui?" is one number (no table, no chart);
+"last 12 months sales dikhao" is a series. A scalar for a period and the sum of that period's series are reconciled
+(`analysis.reconcile`, `Conversation.totals`): a conflicting earlier number is recomputed and flagged, never shown silently.
+Tables render with the same Indian currency format as the cards (`response.display_table`); raw values stay for CSV/Excel/charts.
+Tests: `tests/test_periods_context.py` (the deployed-app conversation, offline).
 
 ## Ambiguity gate (never guess)
 

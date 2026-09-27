@@ -47,10 +47,10 @@ def ask(conv, tools, q):
 # ---- periods
 def test_parse_periods():
     p = parse_period("bhai mujhe last 12 month ka data", TODAY)
-    assert (p["from"], p["to"], p["grain"], p["periods"]) == ("2025-10-01", "2026-09-27", "month", 12)
+    assert (p["from"], p["to"], p["grain"], p["n"], len(p["periods"])) == ("2025-10-01", "2026-09-27", "month", 12, 12)
     assert parse_period("last month sales", TODAY)["from"] == "2026-08-01" and parse_period("last month sales", TODAY)["to"] == "2026-08-31"
     assert parse_period("August wala dikhao", TODAY)["from"] == "2026-08-01"
-    assert parse_period("pichle 3 mahine", TODAY)["periods"] == 3 and parse_period("2025 ka total", TODAY)["to"] == "2025-12-31"
+    assert parse_period("pichle 3 mahine", TODAY)["n"] == 3 and parse_period("2025 ka total", TODAY)["to"] == "2025-12-31"
     assert parse_period("total customers", TODAY) is None
 
 

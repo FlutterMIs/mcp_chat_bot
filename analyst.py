@@ -12,6 +12,7 @@ import pandas as pd
 from grounding import _numbers as _answer_numbers, enrich_result, mislabeled_numbers, plain_answer, result_definition, unsupported_claims, unsupported_numbers
 from memory import add_mapping, add_plan, add_rule, get_context
 from openrouter import OpenRouterAI, compact_schema
+from periods import enforce_period, period_metadata, resolve_date_expression
 from semantics import AmbiguousMeasure, is_pure_complaint, only_known_words, plan_diff, requested_measures, resolve_measures, validate_plan
 import copy
 import json
@@ -33,6 +34,7 @@ class Conversation:
     forced_table: tuple | None = None  # (source_id, sheet_name) the user picked when two sheets fit a question
     _asked_for: str = ""               # the question a pending clarification belongs to
     last_cards: list = field(default_factory=list)
+    totals: dict = field(default_factory=dict)   # {total_key: value} — every total computed so far, for the consistency check
 
 
 @dataclass
@@ -297,10 +299,18 @@ def route_documents(plan, question, schemas):
     return plan
 
 
-def sanitize_plan(plan, question, previous):
+def sanitize_plan(plan, question, previous, resolve_dates=True):
     """Deterministic guard on LLM plans: a time period alone must never split a total into months.
     Keep date_grain only if the user asked for a breakdown/comparison, or this is a follow-up of a plan that had one."""
-    if plan.get("status") != "execute" or plan.get("mode") == "text" or plan.get("operation") != "aggregate":
+    if plan.get("status") != "execute" or plan.get("mode") == "text":
+        return plan
+    # The LLM may read the language; the dates come from the one resolver ("last month" = the previous calendar month,
+    # "last 2 months" = the 2 calendar months ending today — never today-60 days). LLM dates never bypass this.
+    if resolve_dates and plan.get("operation") in ("aggregate", "rows", "query", "compare") and resolve_date_expression(question):
+        plan = enforce_period(plan, question)
+        if not plan.get("date_column"):
+            plan["date_column"] = _only_date_column(plan, previous)
+    if plan.get("operation") != "aggregate":
         return plan
     plan = _count_guard(plan, question)
     grain = plan.get("date_grain")
@@ -314,6 +324,34 @@ def sanitize_plan(plan, question, previous):
         # grouping by the raw date column as well would split the same way
         plan["group_by"] = [g for g in plan.get("group_by") or [] if g != plan.get("date_column")]
     return plan
+
+
+def _only_date_column(plan, previous):
+    """When the planner filtered by a period but named no date column: the previous plan's, else None (validated later)."""
+    return (previous or {}).get("date_column") if (previous or {}).get("source_id") == plan.get("source_id") else None
+
+
+def seed_state(conv, plan, question):
+    """After a planner-made aggregate answer, keep the analysis context so follow-ups ("total kar ke batao", "August ka?",
+    "customer wise") modify this result instead of starting from zero. Only for plain column measures (sum/avg/max/min)."""
+    from analysis import table_of_state
+    from semantics import measure_key
+    if (plan or {}).get("operation") != "aggregate" or plan.get("mode") == "text":
+        return
+    schema = conv.schemas.get(plan.get("source_id")) or {}
+    table = table_of_state(schema, plan.get("sheet_name")) or {}
+    col = next((c for c in table.get("columns", []) if c["name"] == plan.get("metric")), None)
+    agg = (plan.get("aggregation") or "sum").lower()
+    if col is None or col.get("role") == "dimension" or agg not in ("sum", "avg", "max", "min"):
+        return
+    from semantics import column_kind
+    kind = "monetary" if column_kind(col) == "monetary" else "quantity"
+    measure = {"kind": kind, "entity": None, "column_hint": col["name"], **({"aggregation": agg} if agg != "sum" else {})}
+    p = resolve_date_expression(question) or ({"from": plan.get("date_from"), "to": plan.get("date_to"), "label": None} if plan.get("date_from") or plan.get("date_to") else {})
+    conv.state = {"source_id": plan.get("source_id"), "sheet_name": plan.get("sheet_name") or table.get("name"), "date_column": plan.get("date_column"),
+                  "period": p, "grain": plan.get("date_grain") or None, "group_by": list(plan.get("group_by") or []), "metrics": [measure],
+                  "filters": list(plan.get("filters") or []), "top_n": plan.get("top_n"), "sort": plan.get("sort"),
+                  "choices": {measure_key(measure): col["name"]}}
 
 
 def answer(conv, question, api_key, model, tools, log=None):
@@ -453,6 +491,15 @@ def answer(conv, question, api_key, model, tools, log=None):
             conv.recent_plans = (conv.recent_plans + [{"question": question, "plan": plan}])[-5:]
             add_plan(question, plan, validated=untouched and attempt == 0 and plan.get("mode") != "text")
             reply.tool_calls = calls
+            if plan.get("mode") != "text":
+                seed_state(conv, plan, question)
+                conv.last_result, conv.last_cards = reply.df, []
+                if reply.value is not None and plan.get("operation") == "aggregate" and not plan.get("group_by") and not plan.get("date_grain"):
+                    from analysis import reconcile, total_key
+                    note = reconcile(conv, total_key(plan.get("source_id"), plan.get("sheet_name"), result.get("metric") or plan.get("metric"), plan.get("aggregation") or "sum",
+                                                     plan.get("date_from"), plan.get("date_to"), plan.get("filters")), reply.value, None, result.get("metric") or plan.get("metric"))
+                    if note:
+                        reply.text += "\n" + note
             log("ai_done", tools=calls, transport=getattr(tools, "transport", "?"), source=plan.get("source_id"),
                 sheet=plan.get("sheet_name"), ms=int((time.time() - t0) * 1000))
             return _done(conv, question, reply)
@@ -618,15 +665,25 @@ def understood_reply(conv, question, tools, log):
         return Reply(f"📄 Report taiyar hai: *{name}* — summary (source, date range, calculation, totals) + data sheet.", kind="report",
                      files=[{"name": name, "bytes": data, "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}], df=conv.last_result, plan=conv.last_plan)
     metric_swap = bool(intent["metrics"]) and intent["metrics"] != (state.get("metrics") or []) and only_known_words(question, cols)
-    if state and intent["kind"] in ("analysis", "drill") and not only_known_words(question, cols):
+    if state and intent.get("collapse"):
+        # SERIES → TOTAL ("total kar ke batao", "only total"): same source, period, filters and metric; one number, no split.
+        new_state = {**state, "period": intent["period"] or {}, "grain": None, "group_by": [], "metrics": intent["metrics"] or state.get("metrics") or [],
+                     "top_n": None, "sort": None, "concise": intent.get("concise"), "explain_period": intent.get("explain_period")}
+        log("route_state", kind="collapse", metrics=len(new_state["metrics"]), grain=None, group_by=[])
+        return _remember(conv, execute_state(conv, new_state, tools, question, log))
+    if state and intent["kind"] in ("analysis", "drill") and not only_known_words(question, cols) and not intent.get("explain_period"):
         log("route_planner", reason="unknown words — may be a filter value")     # "Code-1032 ka item kaun leta hai": filters are the planner's job
         return None
     if intent["kind"] in ("analysis", "drill") and state and (intent["additive"] or intent["correction"] or intent["kind"] == "drill" or intent.get("period") or intent.get("grain") or intent.get("group_by") or intent.get("top_n") or metric_swap):
         grain = intent["grain"] or (((intent["period"] or {}).get("grain")) if not intent["group_by"] else None)     # "last 12 months" carries month grain
         new_state = {**state, "period": intent["period"] or {}, "grain": grain, "group_by": intent["group_by"], "metrics": intent["metrics"] or state.get("metrics") or [],
-                     "top_n": intent.get("top_n"), "sort": intent.get("sort")}
+                     "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period")}
         log("route_state", kind=intent["kind"], metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"])
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
+    from semantics import value_words
+    if intent["kind"] == "analysis" and not state and intent["metrics"] and value_words(question, cols):
+        log("route_planner", reason="value words — a filter the planner must apply")     # "Acme ka last 2 months sale"
+        return None
     if intent["kind"] == "analysis" and not state and intent["metrics"] and (intent["period"] or intent["grain"] or intent["group_by"] or _settled_choice(conv, intent) or only_known_words(question, cols, [t.get("name") for s in conv.schemas.values() for t in s.get("sheets") or []])):
         # A plain total ("total items sold") runs here too, but only when every word is understood — an unknown
         # word may be a filter value, and filters are the planner's job.
@@ -647,7 +704,7 @@ def understood_reply(conv, question, tools, log):
             return None
         new_state = {"source_id": sid, "sheet_name": sheet, "date_column": date_col if isinstance(date_col, str) else None, "period": intent["period"] or {},
                      "grain": intent["grain"] or ((intent["period"] or {}).get("grain") if not intent["group_by"] else None), "group_by": intent["group_by"],
-                     "metrics": intent["metrics"], "filters": [], "top_n": intent.get("top_n"), "sort": intent.get("sort")}
+                     "metrics": intent["metrics"], "filters": [], "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period")}
         log("route_state", kind="fresh", metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"])
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
     return None
@@ -874,7 +931,7 @@ def verify_previous(conv, tools, ai):
         from analysis import explain_state
         return explain_state(conv)
     question = next((p["question"] for p in reversed(conv.recent_plans) if p["plan"] == old), "")
-    fixed = sanitize_plan(copy.deepcopy(old), question, None)
+    fixed = sanitize_plan(copy.deepcopy(old), question, None, resolve_dates=False)     # explain the dates that were used, as they were
     if old.get("mode") == "text" or old.get("operation") not in ("aggregate", "rows"):
         return Reply("Maine pichhla jawab dobara dekha. Batao kya galat laga — kaunsa number ya kaunsa naam — main wahi check karta hoon.", kind="clarify")
     result = enrich_result(run_data_plan(tools, conv, fixed), fixed)

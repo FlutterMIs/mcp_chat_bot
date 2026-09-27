@@ -13,7 +13,33 @@ from datetime import date
 
 import pandas as pd
 
+from periods import describe as describe_period, period_metadata
 from semantics import AmbiguousMeasure, column_kind, resolve_measures, score_tables, stem, tokens
+
+
+def total_key(sid, sheet, column, aggregation, date_from, date_to, filters):
+    """Identity of one total: same source, column, aggregation, dates and filters must always give the same number."""
+    import json
+    return json.dumps([sid, sheet, column, aggregation, date_from or "", date_to or "", sorted(json.dumps(f, sort_keys=True, default=str) for f in filters or [])])
+
+
+def reconcile(conv, key, value, recompute=None, label=""):
+    """Consistency check across turns: a scalar for a period must equal the sum of that period's series (and vice versa).
+    On a mismatch the number is recomputed once; if it still differs the data changed — say so instead of showing two
+    conflicting answers silently. Returns a note (or None) and stores the value."""
+    totals = getattr(conv, "totals", None)
+    if totals is None:
+        return None
+    old = totals.get(key)
+    note = None
+    if old is not None and value is not None and abs(float(old) - float(value)) > 0.005 * max(abs(float(old)), abs(float(value)), 1.0):
+        fresh = recompute() if recompute else value
+        if abs(float(old) - float(fresh)) > 0.005 * max(abs(float(old)), abs(float(fresh)), 1.0):
+            from analyst import _fmt
+            note = f"⚠️ Pehle isi period ke liye {_fmt(old, label)} aaya tha; ab data mein {_fmt(fresh, label)} hai — source update hua lagta hai. Latest number diya hai."
+        value = fresh
+    totals[key] = value
+    return note
 
 
 def table_of_state(schema, sheet_name):
@@ -106,6 +132,11 @@ def execute_state(conv, state, tools, question="", log=None):
         common.update({"date_column": date_col, **({"date_grain": grain} if grain else {}), **({"date_from": period["from"]} if period.get("from") else {}), **({"date_to": period["to"]} if period.get("to") else {})})
     if state.get("group_by"):
         common["group_by"] = list(state["group_by"])
+    concise, explain = bool(state.get("concise")), bool(state.get("explain_period"))
+    state = {k: v for k, v in state.items() if k not in ("concise", "explain_period")}     # transient flags, not context
+    asks = [a for a in (period.get("asks") or []) if a.get("from") or a.get("to")] if not grain and not keys else []
+    if len(asks) >= 2 and date_col:
+        return _execute_asks(conv, state, tools, question, log, sid, table, measures, common, asks, period, date_col, concise, explain)
     merged, calls = None, []
     for m in measures:
         res = tools.call("aggregate_source", {k: v for k, v in common.items() if v not in (None, [], "")} | {"metric": m["column"], "aggregation": m["aggregation"]})
@@ -152,11 +183,27 @@ def execute_state(conv, state, tools, question="", log=None):
             text += f"\nSabse zyada {m0['label']}: {best[keys[0]]} ({_fmt(float(best[m0['label']]), m0['column'])})."
     else:
         vals = ", ".join(f"{m['label']} {_fmt(float(merged[m['label']].iloc[0]), m['column']) if len(merged) else 0}" for m in measures)
-        text = f"{period.get('label') or span or 'Total'}: {vals}.\nCalculation: {how}."
+        head = (period.get("label") or "Total").title() if period.get("label") else (span or "Total")
+        if period.get("label") and span:
+            head += f" ({span})"
+        text = f"{head}: {vals}." if concise else f"{head}: {vals}.\nCalculation: {how}."
+    if explain and period:
+        text += "\n" + describe_period(period, _ddmmyyyy)
+    if not keys and len(merged) and len(measures) == 1:
+        m0 = measures[0]
+        key = total_key(sid, table.get("name"), m0["column"], m0["aggregation"], period.get("from"), period.get("to"), state.get("filters"))
+        args = {k: v for k, v in common.items() if v not in (None, [], "")} | {"metric": m0["column"], "aggregation": m0["aggregation"]}
+        note = reconcile(conv, key, float(merged[m0["label"]].iloc[0]), lambda: float((tools.call("aggregate_source", args).get("rows") or [{}])[0].get("value") or 0), m0["column"])
+        if note:
+            text += "\n" + note
+    elif "period" in keys and len(measures) == 1 and measures[0]["aggregation"] == "sum" and not state.get("top_n") and len(keys) == 1:
+        m0 = measures[0]      # the series total for this period must match the scalar for the same period
+        key = total_key(sid, table.get("name"), m0["column"], m0["aggregation"], period.get("from"), period.get("to"), state.get("filters"))
+        reconcile(conv, key, float(pd.to_numeric(merged[m0["label"]], errors="coerce").sum()), None, m0["column"])
     plan = {"status": "execute", "mode": "data", "operation": "multi_metric", "source_id": sid, "sheet_name": table.get("name"), "metric": measures[0]["column"],
             "aggregation": measures[0]["aggregation"], "metrics": measures, "group_by": list(state.get("group_by") or []), "date_column": date_col if (period or grain) else None,
             "date_grain": grain, "date_from": period.get("from"), "date_to": period.get("to"), "filters": state.get("filters") or [], "top_n": state.get("top_n"), "sort": state.get("sort"),
-            "title": f"{(grain or (', '.join(keys) if keys else period.get('label') or 'Total')).title()} — {labels}"}
+            "period": period_metadata(period), "title": f"{(grain or (', '.join(keys) if keys else period.get('label') or 'Total')).title()} — {labels}"}
     conv.state = dict(state, metrics=state.get("metrics") or [], resolved=measures, sheet_name=table.get("name"), date_column=date_col)
     conv.last_plan = plan
     conv.recent_plans = (conv.recent_plans + [{"question": question, "plan": plan}])[-5:]
@@ -165,6 +212,38 @@ def execute_state(conv, state, tools, question="", log=None):
         return Reply(text, kind="answer", df=None, metric=measures[0]["column"], plan=plan, value=float(merged[measures[0]["label"]].iloc[0]) if len(merged) and len(measures) == 1 else None, cards=cards)
     chart = {"type": "line" if "period" in keys else "bar", "x": keys[0], "y": table_measures[0]["label"]} if len(merged) >= 2 else None
     return Reply(text, kind="answer", df=merged, chart=chart, metric=table_measures[0]["column"], plan=plan, cards=cards, drillable="period" if "period" in keys else None)
+
+
+def _execute_asks(conv, state, tools, question, log, sid, table, measures, common, asks, period, date_col, concise, explain):
+    """A compound period request ("August + September ka total aur August ka total"): one total per asked period,
+    every number computed by the tools, no table, one card per ask."""
+    from analyst import Reply, _ddmmyyyy, _fmt
+    cards, lines, calls = [], [], []
+    for a in asks:
+        args = {k: v for k, v in common.items() if v not in (None, [], "") and k not in ("date_from", "date_to")} | {"date_column": date_col, "date_from": a["from"], "date_to": a["to"]}
+        vals = []
+        for m in measures:
+            res = tools.call("aggregate_source", args | {"metric": m["column"], "aggregation": m["aggregation"]})
+            calls.append(f"{m['aggregation']}({m['column']}) {a['from']}→{a['to']}")
+            v = float((res.get("rows") or [{}])[0].get("value") or 0)
+            vals.append((m, v))
+            cards.append({"label": a["label"] if len(measures) == 1 else f"{a['label']} — {m['label']}", "value": v, "note": f"{_ddmmyyyy(a['from'])} → {_ddmmyyyy(a['to'])}"})
+            key = total_key(sid, table.get("name"), m["column"], m["aggregation"], a["from"], a["to"], state.get("filters"))
+            reconcile(conv, key, v, None, m["column"])
+        lines.append(f"• {a['label']} ({_ddmmyyyy(a['from'])} → {_ddmmyyyy(a['to'])}): " + ", ".join(f"{m['label']} {_fmt(v, m['column'])}" if len(measures) > 1 else _fmt(v, m["column"]) for m, v in vals))
+    how = "; ".join(f"{m['label']} = {'unique count of' if m['aggregation'] == 'count_distinct' else m['aggregation'].upper() + ' of'} {m['column']}" for m in measures)
+    text = "\n".join(lines) + ("" if concise else f"\nCalculation: {how}.")
+    if explain:
+        text += "\n" + describe_period(period, _ddmmyyyy)
+    plan = {"status": "execute", "mode": "data", "operation": "multi_metric", "source_id": sid, "sheet_name": table.get("name"), "metric": measures[0]["column"],
+            "aggregation": measures[0]["aggregation"], "metrics": measures, "group_by": [], "date_column": date_col, "date_grain": None,
+            "date_from": period.get("from"), "date_to": period.get("to"), "filters": state.get("filters") or [], "top_n": None, "sort": None,
+            "period": period_metadata(period), "asks": asks, "title": " / ".join(a["label"] for a in asks) + f" — {', '.join(m['label'] for m in measures)}"}
+    conv.state = dict(state, metrics=state.get("metrics") or [], resolved=measures, sheet_name=table.get("name"), date_column=date_col)
+    conv.last_plan = plan
+    conv.recent_plans = (conv.recent_plans + [{"question": question, "plan": plan}])[-5:]
+    log("ai_done", tools=calls, transport=getattr(tools, "transport", "?"), source=sid, sheet=table.get("name"))
+    return Reply(text, kind="answer", df=None, metric=measures[0]["column"], plan=plan, value=None, cards=cards)
 
 
 def explain_state(conv):

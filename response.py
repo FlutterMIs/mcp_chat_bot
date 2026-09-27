@@ -38,6 +38,9 @@ class FinalResponse:
     images: list = field(default_factory=list)
     videos: list = field(default_factory=list)
     debug: dict = field(default_factory=dict)  # {"trace", "plan", "tool_calls"} — never rendered unless debug mode
+    value: float | None = None                 # the one number of a scalar answer (raw, unformatted)
+    date_range: str | None = None              # "2026-08-01 → 2026-09-27" — the resolved period the result covers
+    period: dict | None = None                 # canonical period metadata (expression, reference date, periods)
 
 
 def _numeric_cols(df):
@@ -135,6 +138,22 @@ def finalize(reply, question="", chart_asked=False, debug=False):
                        chart=_chart_for(reply, shape, wanted), source_info=_source_info(reply),
                        drilldown=reply.drillable if shape in ("series", "ranking", "breakdown") else None,
                        options=list(reply.options or []), files=list(reply.files or []), images=list(reply.images or []), videos=list(reply.videos or []))
+    fr.value = reply.value if shape == "scalar" else None
+    fr.date_range = fr.source_info.get("date_range")
+    fr.period = (reply.plan or {}).get("period")
     if debug:
         fr.debug = {"trace": list(reply.trace or []), "plan": reply.plan, "tool_calls": reply.tool_calls}
     return fr
+
+
+def display_table(df):
+    """The table as people read it: Indian grouping, ₹ on money columns, whole counts. The raw frame stays for
+    charts and downloads, so no value is altered — only its text."""
+    if df is None or df.empty:
+        return df
+    from analyst import _fmt
+    out = df.copy()
+    for c in out.columns:
+        if pd.api.types.is_numeric_dtype(out[c]) and not pd.api.types.is_bool_dtype(out[c]) and c != "period":
+            out[c] = out[c].map(lambda v: "" if pd.isna(v) else _fmt(float(v), str(c)))
+    return out

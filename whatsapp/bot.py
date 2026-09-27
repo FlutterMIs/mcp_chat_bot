@@ -303,7 +303,7 @@ class WhatsAppBot:
             return None
         conv = Conversation(schemas=schemas, last_plan=state.get("last_plan"), history=state.get("history", []),
                             recent_plans=state.get("recent_plans", []), focus=state.get("focus"), pending_rule=state.get("pending_rule"), state=state.get("analysis"),
-                            pending_choice=state.get("pending_choice"))
+                            pending_choice=state.get("pending_choice"), totals=dict(state.get("totals") or {}))
         if state.get("last_result"):
             import pandas as pd
             conv.last_result = pd.DataFrame(state["last_result"]["rows"])
@@ -328,6 +328,7 @@ class WhatsAppBot:
         state["last_plan"], state["history"], state["recent_plans"], state["pending_rule"] = conv.last_plan, conv.history, conv.recent_plans, conv.pending_rule
         state["analysis"] = conv.state
         state["pending_choice"] = conv.pending_choice
+        state["totals"] = dict(list(conv.totals.items())[-50:])
         if reply.df is not None and not reply.df.empty:
             state["last_result"] = {"rows": reply.df.head(200).to_dict(orient="records"), "chart": reply.chart, "metric": reply.metric}
         self.store.save(key, state)

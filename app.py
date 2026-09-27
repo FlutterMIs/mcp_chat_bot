@@ -8,13 +8,13 @@ from openrouter import OpenRouterAI
 from memory import clear_memory
 import analyst
 from analyst import Conversation, LocalTools
-from response import finalize
+from response import display_table, finalize
 from tts_service import LANG_TAGS, available_providers, build_speech_text, get_provider
 from tts_ui import browser_voices, speech_controls
 from chart_ui import chart_menu, chartable, draw_selected_chart
 
 load_dotenv(); st.set_page_config(page_title="MCP Universal Business Analyst",page_icon="🧠",layout="wide")
-for k,v in {"messages":[],"last_plan":None,"recent_plans":[],"focus":None,"sources":{},"schemas":{},"autoplay_id":None,"analysis":None,"last_result":None,"last_cards":[],"pending_q":None}.items(): st.session_state.setdefault(k,v)
+for k,v in {"messages":[],"last_plan":None,"recent_plans":[],"focus":None,"sources":{},"schemas":{},"autoplay_id":None,"analysis":None,"last_result":None,"last_cards":[],"pending_q":None,"totals":{}}.items(): st.session_state.setdefault(k,v)
 
 st.markdown("## 🧠 Business Analyst")
 _src=[re.split(r"\s[–|-]\s",str(s.get("name") or sid))[0][:28] for sid,s in st.session_state.schemas.items()]
@@ -127,16 +127,17 @@ def render_assistant(m):
     df=m.get('df')
     if df is not None and not df.empty and not (len(df)==1 and list(df.columns)==["value"]):   # a lone number is already in the text
         shown=df.rename(columns={"value":m['metric']}) if m.get('metric') and "value" in df.columns and m['metric'] not in df.columns else df
+        pretty=display_table(shown)      # ₹1,48,58,907.21 in the table too, same as the cards; raw numbers stay for CSV/Excel/chart
         if m.get('drillable') and m['drillable'] in shown.columns:
             st.caption("Kisi row par click karo — us period ka detail khulega.")
-            ev=st.dataframe(shown,width="stretch",hide_index=True,on_select="rerun",selection_mode="single-row",key=f"tbl_{m['id']}")
+            ev=st.dataframe(pretty,width="stretch",hide_index=True,on_select="rerun",selection_mode="single-row",key=f"tbl_{m['id']}")
             sel=(ev.selection.rows if ev and getattr(ev,'selection',None) else [])
             if sel and st.session_state.get(f"drilled_{m['id']}")!=sel[0]:
                 st.session_state[f"drilled_{m['id']}"]=sel[0]
                 st.session_state.pending_q=f"{shown.iloc[sel[0]][m['drillable']]} details"
                 st.rerun()
         else:
-            st.dataframe(shown,width="stretch",hide_index=True)
+            st.dataframe(pretty,width="stretch",hide_index=True)
         if m.get('table_note'): st.caption(m['table_note'])
     if m.get('options'):
         pick=st.pills("Choose",m['options'],selection_mode="single",key=f"opt_{m['id']}",label_visibility="collapsed")
@@ -183,6 +184,7 @@ def answer_question(q):
     for sid,src in st.session_state.sources.items(): m.register(sid,src)
     conv=Conversation(schemas=dict(st.session_state.schemas),last_plan=st.session_state.last_plan,recent_plans=list(st.session_state.recent_plans),focus=st.session_state.focus,
                       state=st.session_state.analysis,last_result=st.session_state.last_result,last_cards=list(st.session_state.last_cards or []),pending_choice=st.session_state.get("pending_choice"),
+                      totals=dict(st.session_state.get("totals") or {}),
                       history=[{'role':x['role'],'content':x['content'],**({'media':[{'title':v['title'],'url':v['url']} for v in x['videos']] or None} if x.get('videos') else {}),
                                **({'media':[{'title':i['alt'],'url':i['url']} for i in x['images']]} if x.get('images') and not x.get('videos') else {})} for x in st.session_state.messages[:-1]])
     with st.status("Samajh raha hoon…",expanded=False) as status:
@@ -193,6 +195,7 @@ def answer_question(q):
         status.update(label="Taiyar ✓",state="complete")
     st.session_state.last_plan=conv.last_plan; st.session_state.recent_plans=conv.recent_plans
     st.session_state.analysis=conv.state; st.session_state.last_result=conv.last_result; st.session_state.last_cards=conv.last_cards; st.session_state.pending_choice=conv.pending_choice
+    st.session_state.totals=conv.totals
     fr=finalize(r,q,debug=bool(st.session_state.get('debug_mode')))
     extra={'shape':fr.shape}
     if fr.table is not None: extra.update({'df':fr.table,'chart':fr.chart,'metric':r.metric,'table_note':fr.table_note})

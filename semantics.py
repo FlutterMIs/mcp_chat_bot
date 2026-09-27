@@ -355,8 +355,35 @@ def only_known_words(question, columns, sheet_names=None):
                                            "tak", "quarter", "fy", "till", "upto", "since", "se", "wise", "trend", "graph", "graf", "chart", "plot", "visual", "report", "summary", "sept")}
         KNOWN_WORDS |= {stem(m.lower()) for m in list(calendar.month_name) + list(calendar.month_abbr) if m}
         KNOWN_WORDS |= {stem(w) for w in ("janvari", "farvari", "faravari", "aprail", "mai", "joon", "julai", "agast", "sitambar", "aktoobar", "navambar", "disambar")}
+        KNOWN_WORDS |= {stem(w) for w in ("si", "sa", "konsi", "kaunsi", "konsa", "kaunsa", "kab", "kitne", "column", "columns", "colume", "col", "field", "fields", "moment",
+                                           "bad", "baad", "pehle", "pahle", "usse", "isse", "jaise", "waise", "matlab", "yani", "yaani", "means", "mtlb", "for", "of", "the", "in", "on",
+                                           "uska", "uski", "iska", "iski", "unka", "unki", "sabka", "sabki", "poori", "puri", "sari", "saari", "kuch", "koi", "har", "each", "every",
+                                           "karke", "karo", "kr", "krke", "ho", "hoon", "hu", "dedo", "bolo", "bol", "batade", "bta", "number", "numbers", "figure", "amount")}
+        from periods import NUM_WORDS
+        KNOWN_WORDS |= {stem(w) for w in NUM_WORDS}
+    from periods import resolve_date_expression
+    p = resolve_date_expression(question)
+    period_words = set(tokens(p["date_expression"])) if p else set()          # "last two months" / "August September" are understood by the resolver
     col_words = {stem(t) for c in columns for t in tokens(c["name"])} | {stem(t) for n in (sheet_names or []) for t in tokens(n)}
-    return all(stem(t) in KNOWN_WORDS or stem(t) in col_words or t.isdigit() for t in content_tokens(question))
+    return all(stem(t) in KNOWN_WORDS or stem(t) in col_words or t.isdigit() or t in period_words for t in content_tokens(question))
+
+
+def value_words(question, columns):
+    """Words of the question that look like data values rather than vocabulary — a filter the planner must handle:
+    a token seen among a dimension column's sample values, a code with digits and letters, or a capitalised name
+    mid-sentence ("Acme ka last 2 months sale"). Typos and unknown Hinglish filler do not count."""
+    only_known_words("", columns)                                 # builds KNOWN_WORDS
+    samples = {t for c in columns if c.get("role") == "dimension" for v in c.get("sample_values") or [] for t in tokens(v) if len(t) > 2}
+    col_words = {stem(t) for c in columns for t in tokens(c["name"])}
+    words = re.findall(r"[A-Za-z0-9₹$%][\w'-]*", str(question or ""))
+    out = []
+    for i, w in enumerate(words):
+        t = w.lower()
+        if stem(t) in KNOWN_WORDS or stem(t) in col_words or t in STOP or t.isdigit():
+            continue
+        if t in samples or (re.search(r"\d", t) and re.search(r"[a-z]", t)) or (i > 0 and w[:1].isupper() and not w.isupper()):
+            out.append(w)
+    return out
 
 
 SECONDARY = {"alt", "alternate", "alternative", "secondary", "old", "prev", "previous", "backup", "dup", "duplicate"}

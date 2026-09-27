@@ -4,68 +4,17 @@ Everything here is deterministic and data-agnostic. It knows about time phrases 
 "pichle mahine"), follow-up forms ("X bhi add karo", "top 10", "report bana do", "<month> wala dikhao") and
 corrections — but nothing about any business domain. Column choices come from `semantics.resolve_measures`.
 """
-import calendar
 import re
-from datetime import date, timedelta
+from datetime import date
 
+from periods import MONTHS, resolve_date_expression
 from semantics import COUNT_CUES, GROUP_STEMS, column_kind, ITEM_LIKE, NEGATION, _SYN_OF, content_tokens, entity_of, question_intent, requested_measures, stem, tokens
-
-MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
-MONTHS.update({m.lower(): i for i, m in enumerate(calendar.month_abbr) if m})
-MONTHS.update({"sept": 9, "janvari": 1, "farvari": 2, "faravari": 2, "march": 3, "aprail": 4, "mai": 5, "joon": 6, "julai": 7, "agast": 8, "sitambar": 9,
-               "aktoobar": 10, "navambar": 11, "disambar": 12, "जनवरी": 1, "फ़रवरी": 2, "फरवरी": 2, "मार्च": 3, "अप्रैल": 4, "मई": 5, "जून": 6,
-               "जुलाई": 7, "अगस्त": 8, "सितंबर": 9, "अक्टूबर": 10, "नवंबर": 11, "दिसंबर": 12})
-_MONTH_RE = "|".join(sorted(map(re.escape, MONTHS), key=len, reverse=True))
-
-
-def _month_bounds(y, m):
-    return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
 
 
 def parse_period(question, today=None):
-    """Relative/absolute time phrases → {"label", "from", "to", "grain"} (ISO dates) or None.
-    'last 12 months' = the 12 full calendar months ending with the current one (zero months included later)."""
-    today = today or date.today()
-    q = " " + str(question or "").lower() + " "
-    m = re.search(r"\b(?:last|pichl[ae]|pichhl[ae]|previous|past|gaye|beete)\s+(\d{1,2})\s*(month|months|mahin\w*|maheen\w*|day|days|din|week|weeks|hafte|year|years|saal)\b", q)
-    if m:
-        n, unit = int(m.group(1)), m.group(2)
-        if unit.startswith(("month", "mah")):
-            y, mo = today.year, today.month
-            start_y, start_m = (y * 12 + mo - 1 - (n - 1)) // 12, (y * 12 + mo - 1 - (n - 1)) % 12 + 1
-            return {"label": f"last {n} months", "from": date(start_y, start_m, 1).isoformat(), "to": today.isoformat(), "grain": "month", "periods": n}
-        if unit.startswith(("day", "din")):
-            return {"label": f"last {n} days", "from": (today - timedelta(days=n - 1)).isoformat(), "to": today.isoformat(), "grain": "day", "periods": n}
-        if unit.startswith(("week", "haft")):
-            return {"label": f"last {n} weeks", "from": (today - timedelta(days=7 * n - 1)).isoformat(), "to": today.isoformat(), "grain": "day"}
-        return {"label": f"last {n} years", "from": date(today.year - n + 1, 1, 1).isoformat(), "to": today.isoformat(), "grain": "year", "periods": n}
-    if re.search(r"\b(last|pichl[ae]|pichhl[ae]|previous|gaya|gaye)\s+(month|mahin\w*|maheen\w*)\b", q):
-        y, mo = (today.year, today.month - 1) if today.month > 1 else (today.year - 1, 12)
-        a, b = _month_bounds(y, mo)
-        return {"label": "last month", "from": a.isoformat(), "to": b.isoformat(), "grain": None}
-    if re.search(r"\b(this|current|is|iss|chalu|abhi ka|running)\s+(month|mahin\w*|maheen\w*)\b|\bcurrent month\b|\bmtd\b", q):
-        a, _ = _month_bounds(today.year, today.month)
-        return {"label": "this month", "from": a.isoformat(), "to": today.isoformat(), "grain": None}
-    if re.search(r"\b(last|pichl[ae]|pichhl[ae]|previous)\s+(year|saal)\b", q):
-        return {"label": "last year", "from": date(today.year - 1, 1, 1).isoformat(), "to": date(today.year - 1, 12, 31).isoformat(), "grain": None}
-    if re.search(r"\b(this|current|is|iss)\s+(year|saal)\b|\bytd\b", q):
-        return {"label": "this year", "from": date(today.year, 1, 1).isoformat(), "to": today.isoformat(), "grain": None}
-    m = re.search(r"(?<!\d)(20\d{2})-(\d{2})(?!\d)", q)
-    if m and 1 <= int(m.group(2)) <= 12:
-        y, mo = int(m.group(1)), int(m.group(2))
-        a, b = _month_bounds(y, mo)
-        return {"label": f"{calendar.month_name[mo]} {y}", "from": a.isoformat(), "to": min(b, today).isoformat() if (y, mo) == (today.year, today.month) else b.isoformat(), "grain": None}
-    m = re.search(r"\b(" + _MONTH_RE + r")\b\.?\s*(\d{4})?", q)
-    if m and m.group(1) in MONTHS:
-        mo = MONTHS[m.group(1)]
-        y = int(m.group(2)) if m.group(2) else (today.year if mo <= today.month else today.year - 1)
-        a, b = _month_bounds(y, mo)
-        return {"label": f"{calendar.month_name[mo]} {y}", "from": a.isoformat(), "to": min(b, today).isoformat() if (y, mo) == (today.year, today.month) else b.isoformat(), "grain": None}
-    m = re.search(r"(?<!\d)(20\d{2})(?!\d)", q)
-    if m and not re.search(r"\d{4}-\d{2}", q):
-        y = int(m.group(1))
-        return {"label": str(y), "from": date(y, 1, 1).isoformat(), "to": (today if y == today.year else date(y, 12, 31)).isoformat(), "grain": None}
-    return None
+    """Relative/absolute time phrases → the canonical period dict from `periods.resolve_date_expression`
+    ({"label", "from", "to", "grain", "period_type", "periods", "asks"?}) or None. One resolver for every path."""
+    return resolve_date_expression(question, today or date.today())
 
 
 GRAIN_WORDS = [("day", r"\b(day|days|daily|din|date wise|date-wise|datewise|roz|dainik|har din)\b"),
@@ -79,10 +28,19 @@ REPORT_Q = re.compile(r"\b(report|summary report|pdf|excel report|report bana|re
 SUPERLATIVE_ONLY = re.compile(r"\b(sabh? ?se|bahut|bohot|bhut|highest|lowest|most|least|best|worst|maximum|minimum)\b", re.I)
 DRILL_Q = re.compile(r"\b(details?|detail dikhao|open karo|click|drill|breakup|break up|andar|ke andar|wala dikhao|wale dikhao|expand)\b", re.I)
 SHOW_ITEMS = re.compile(r"\b(kaun kaun|kon kon|which|konse|kaunse|kya kya)\b", re.I)
+# SERIES → TOTAL: "total kar ke batao", "sab mila ke", "only total", "grand total", "ek number mein"
+COLLAPSE = re.compile(r"\b(total|totals|sum|overall|kul|poora|pura|grand total|sab mila ?ke|milake|mila ?kar|jod ?ke|jodke|jod kar|add kar ?ke|combined|ek number|single number|कुल|टोटल)\b", re.I)
+ONLY = re.compile(r"\b(only|sirf|bas|just|keval|simple|short|ek line|one line|sirf number|number only)\b", re.I)
+# A total question ("kitni hui", "total batao") vs a breakdown request ("dikhao", "table", "trend", "wise")
+SCALAR_ASK = re.compile(r"\b(total|totals|sum|kul|overall|kitn[aie]|kitna|how much|कितन\w*|कुल)\b", re.I)
+BREAKDOWN_ASK = re.compile(r"\b(dikhao|dikha|dikhana|show|table|colum\w*|list|trend|graph|graf|chart|plot|breakup|break up|wise|har|each|every|per|month by month|monthly|daily|weekly|yearly|split|distribution)\b", re.I)
+DATE_ASK = re.compile(r"\b(?:kaun|kon|konsi|kaunsi|which|kis|kab)\s*(?:si|sa|se|sey)?\s*(?:kon\s*se\s*)?(?:date|dates|period|range|tarikh|tareekh|time|din)\b|\bdates?\s+(?:tak|se)\b|\bkab\s+se\s+kab\s+tak\b|\bdate\s+range\b", re.I)
 
 
-def wants_grain(question):
-    q = str(question or "").lower()
+def wants_grain(question, period=None):
+    q = re.sub(r"\s+", " ", str(question or "").lower())
+    if period and period.get("date_expression"):
+        q = q.replace(period["date_expression"], " ")         # "pichle do mahine ki sale" names a period, not a breakdown
     for g, pat in GRAIN_WORDS:
         if re.search(pat, q):
             return g
@@ -149,7 +107,7 @@ def understand(question, columns, state=None, today=None):
         if ent:
             measures = [{"kind": "count", "entity": ent, "column_hint": None}]
     period = parse_period(q, today)
-    grain = wants_grain(q)
+    grain = wants_grain(q, period)
     dim = mentioned_dimension(q, columns, measures)
     tops = list(FOLLOW_TOP.finditer(q))
     loose = re.search(r"(?<![\d-])(\d{1,3})(?![\d-])", q) if tops and not any(t.group(2) for t in tops) and not parse_period(q, today) else None
@@ -166,16 +124,31 @@ def understand(question, columns, state=None, today=None):
     additive = bool(FOLLOW_ADD.search(q)) and bool(state)
     correction = bool(re.search(r"\b(nahi|nhi|no|not|galat|wrong|instead|ki jagah|nahi chahiye)\b", q, re.I)) and bool(state)
     short = len(tokens(q)) <= 6
+    # "last 2 months ki sale kitni hui?" is one total, not a month-wise table: the period's default breakdown is dropped
+    # for a single-measure total question without any breakdown word. "last 12 months sales dikhao" stays a series.
+    explain = bool(DATE_ASK.search(q))
+    if period and period.get("grain") and not grain and not dim and len(measures) <= 1 and (SCALAR_ASK.search(q) or explain) and not BREAKDOWN_ASK.search(q) and not top_n:
+        period = dict(period, grain=None)
+    # SERIES → TOTAL follow-up: no new period/grain/dimension/top-N, just "total kar ke batao" / "only total".
+    same_metric = not measures or [{k: v for k, v in m.items() if k != "column_hint"} for m in measures] == [{k: v for k, v in m.items() if k not in ("column_hint", "aggregation")} for m in (state.get("metrics") or [])]
+    collapse = bool(state) and not additive and bool(COLLAPSE.search(q)) and not grain and not dim and not period and not top_n and same_metric
+    concise = collapse and bool(ONLY.search(q))
     intent = {"question": q, "metrics": measures, "new_metrics": list(measures), "period": period, "grain": grain, "group_by": [dim] if dim else [], "top_n": top_n,
               "sort": ("asc" if low else "desc") if top else None, "direction_said": bool(low or HIGH_WORDS.search(q)),
               "additive": additive, "correction": correction, "report": bool(REPORT_Q.search(q)) and not measures,
-              "detail": bool(DRILL_Q.search(q) or SHOW_ITEMS.search(q)), "kind": None}
+              "detail": bool(DRILL_Q.search(q) or SHOW_ITEMS.search(q)), "kind": None,
+              "collapse": collapse, "concise": concise, "explain_period": explain}
     if intent["report"] and state:
         intent["kind"] = "report"
         return intent
     # Follow-up merge: keep the previous source/period/grain/metrics unless the message changes them.
-    if state and (additive or correction or short or (top_n and not dim and not period) or not (measures or period or grain or dim)):
+    if state and (additive or correction or short or collapse or (top_n and not dim and not period) or not (measures or period or grain or dim)):
         merged = {k: state.get(k) for k in ("source_id", "sheet_name", "date_column", "period", "grain", "group_by", "metrics", "filters", "top_n", "sort")}
+        if collapse:
+            # keep source, period, filters and metrics; change only the operation: one total, no split, no ranking
+            merged["grain"], merged["group_by"], merged["top_n"], merged["sort"] = None, [], None, None
+            if merged.get("period"):
+                merged["period"] = dict(merged["period"], grain=None)
         if period:
             merged["period"] = period
             if period.get("grain"):
