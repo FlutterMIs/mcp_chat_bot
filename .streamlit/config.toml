@@ -1,5 +1,5 @@
-# Web app binds to this machine only. To open it from another device on your network, change the
-# address to "0.0.0.0" — and then put a password/reverse proxy in front, because the app has no login.
+# Web app binds to this machine only. For phones/other devices set address = "0.0.0.0" (or run behind nginx/Caddy
+# with https). The app has its own login (APP_AUTH_MODE=password|oidc); keep APP_AUTH_MODE=none only on a private machine.
 [server]
 address = "127.0.0.1"
 port = 8501
