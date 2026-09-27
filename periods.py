@@ -121,6 +121,27 @@ def resolve_date_expression(text, reference_date=None):
     m = re.search(r"\b" + _THIS + r"\s+" + _YEAR_U + r"\b|\bytd\b|\byear to date\b", q)
     if m:
         return _result(m.group(0), today, "current_year_to_date", "this year", date(today.year, 1, 1), today)
+    m = re.search(r"\b" + _THIS + r"\s+" + _WEEK_U + r"\b", q)
+    if m:
+        start = today - timedelta(days=today.weekday())               # Monday → today
+        return _result(m.group(0), today, "current_week_to_date", "this week", start, today, grain="day")
+    m = re.search(r"\b" + _LAST + r"\s+" + _WEEK_U + r"\b", q)
+    if m:
+        end = today - timedelta(days=today.weekday() + 1)             # last Sunday
+        return _result(m.group(0), today, "previous_week", "last week", end - timedelta(days=6), end, grain="day")
+    m = re.search(r"\b(?:fy|financial year|fiscal year|वित्त वर्ष)\s*'?(\d{2,4})?(?:\s*[-/–]\s*(\d{2,4}))?\b", q)
+    if m:
+        y = m.group(1)
+        if y:
+            y0 = int(y) if len(y) == 4 else 2000 + int(y)
+        else:
+            y0 = today.year if today.month >= 4 else today.year - 1  # Indian FY: April → March
+        start, end = date(y0, 4, 1), date(y0 + 1, 3, 31)
+        return _result(m.group(0), today, "financial_year", f"FY {y0}-{str(y0 + 1)[-2:]}", start, min(end, today) if start <= today <= end else end, grain="month")
+    m = re.search(r"\b(tomorrow|kal ko|kal ka plan|अगले दिन)\b", q)
+    if m and not re.search(r"\b(yesterday)\b", q):
+        d = today + timedelta(days=1)
+        return _result(m.group(0), today, "day", "tomorrow", d, d)
     m = re.search(r"\b(today|aaj|आज)\b", q)
     if m and not re.search(r"\b(till|tak|upto|up to|se)\s+(today|aaj)\b|\b(today|aaj)\s+tak\b", q):
         return _result(m.group(0), today, "day", "today", today, today)

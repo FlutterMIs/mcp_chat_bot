@@ -4,6 +4,7 @@
 - mappings: {"source", "sheet", "term", "column"} — user-taught column meanings.
 - successful_plans: only plans that passed validation unchanged; at most 5 per source, 100 total.
 """
+import contextvars
 import json
 import threading
 from datetime import datetime
@@ -12,6 +13,18 @@ from pathlib import Path
 MEMORY_FILE = Path(__file__).with_name("workspace_memory.json")
 PLANS_PER_SOURCE = 5
 _lock = threading.Lock()
+# Workspace scope: when a channel sets it (backend.db-backed deployments), every call below goes to backend.learning
+# for that workspace instead of the JSON file. Tests and the legacy single-user install keep the file.
+_scope = contextvars.ContextVar("memory_scope", default=None)
+
+
+def set_scope(workspace_id, user_id=None):
+    """Route learning to the database for this workspace (for the current thread / request). None → JSON file."""
+    _scope.set({"workspace_id": workspace_id, "user_id": user_id} if workspace_id else None)
+
+
+def scope():
+    return _scope.get()
 
 
 def _empty():
@@ -39,6 +52,10 @@ def _save(data):
 
 def add_rule(text: str, source_id: str | None = None):
     """Store a confirmed rule for one source. A rule without source_id is never sent to the planner."""
+    sc = scope()
+    if sc:
+        from backend import learning
+        return learning.add_rule(sc["workspace_id"], source_id, text, sc.get("user_id"))
     with _lock:
         data = _load()
         if text and not any(r.get("text") == text and r.get("source_id") == source_id for r in data["rules"]):
@@ -48,6 +65,10 @@ def add_rule(text: str, source_id: str | None = None):
 
 
 def add_mapping(source: str, sheet: str | None, user_term: str, column: str):
+    sc = scope()
+    if sc:
+        from backend import learning
+        return learning.add_mapping(sc["workspace_id"], source, sheet, user_term, column, user_id=sc.get("user_id"))
     with _lock:
         data = _load()
         item = {"source": source, "sheet": sheet, "term": user_term, "column": column, "updated_at": datetime.now().isoformat()}
@@ -61,6 +82,10 @@ def add_plan(question: str, plan: dict, validated: bool = False):
     """Only validated plans become examples. Keeps the newest PLANS_PER_SOURCE per source."""
     if not validated or not plan.get("source_id"):
         return
+    sc = scope()
+    if sc:
+        from backend import learning
+        return learning.add_plan(sc["workspace_id"], question, plan, validated)
     with _lock:
         data = _load()
         sid = plan["source_id"]
@@ -74,6 +99,10 @@ def add_plan(question: str, plan: dict, validated: bool = False):
 
 def get_context(limit=PLANS_PER_SOURCE, source_ids=None):
     """Memory for the planner, restricted to the sources connected right now."""
+    sc = scope()
+    if sc:
+        from backend import learning
+        return learning.get_context(sc["workspace_id"], source_ids, limit)
     data = _load()
     ids = set(source_ids or [])
     plans = [p for p in data["successful_plans"] if (p.get("plan") or {}).get("source_id") in ids]
@@ -83,6 +112,10 @@ def get_context(limit=PLANS_PER_SOURCE, source_ids=None):
 
 
 def forget_source(source_id: str):
+    sc = scope()
+    if sc:
+        from backend import learning
+        return learning.forget_source(sc["workspace_id"], source_id)
     with _lock:
         data = _load()
         data["rules"] = [r for r in data["rules"] if r.get("source_id") != source_id]
@@ -92,5 +125,9 @@ def forget_source(source_id: str):
 
 
 def clear_memory():
+    sc = scope()
+    if sc:
+        from backend import learning
+        return learning.clear(sc["workspace_id"])
     with _lock:
         _save(_empty())

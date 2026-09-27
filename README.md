@@ -17,6 +17,48 @@ A local Streamlit prototype with OpenRouter as the reasoning model and MCP-style
 - Optional real MCP stdio server in `mcp_stdio_server.py` using FastMCP.
 - Deterministic charts for every result table: time series → line, categories → bar (raw rows are summed per label). The **⋮ Chart** menu next to *Download CSV* switches between bar, horizontal bar, line, area, pie, donut, scatter or table only, and lets you pick the X and Y columns. Built with Altair in `chart_ui.py`, no LLM call.
 
+## V7 — accounts, workspaces, persistent sources and chats (2026-09-27)
+
+The web app is now a multi-device product: **login → workspace → Chat · Chats · Data Sources · Settings**. Everything the
+user adds or says is stored server-side (`backend/`), so the same account sees the same sources and conversations on a
+laptop, a phone, another browser, after logout/login and after a restart. `analyst.py` and the tools are unchanged; the
+channels stopped owning state.
+
+```
+Browser (Streamlit: ui/*)                      WhatsApp (whatsapp/bot.py)
+   st.login / email+password                      phone linked with /link <code> (Settings → Generate link code)
+        └──────────────► backend/ ◄──────────────────────┘
+   auth.py  workspaces.py  sources.py (registry + cache)  credentials.py (Fernet)  google_oauth.py
+   conversations.py (chats, messages, results)  learning.py (per-workspace mappings/rules)  preferences.py  events.py
+        └──────────────► analyst.answer(conv, question, tools)  (unchanged contract)
+```
+
+| Table | Holds |
+|---|---|
+| `users`, `workspaces`, `workspace_members`, `channel_identities` | accounts, personal workspace, WhatsApp number ↔ workspace |
+| `sources`, `source_credentials`, `source_syncs`, `source_files`, `web_documents` | the permanent source registry: Google Sheet (public or OAuth), website (normalized text/tables stored; refresh re-fetches), files (bytes under `DATA_DIR/files/<ws>/`), databases (URL encrypted) |
+| `source_mappings`, `source_rules`, `validated_plans` | what the assistant learned, scoped to (workspace, source) — replaces `workspace_memory.json` |
+| `conversations`, `messages`, `results` | chat history; `analytical_context` = the analyst's state, so "August ka detail" works on device 2 |
+| `user_preferences`, `events` | settings that follow the user; operator log (request_id, conversation_id, ms, no secrets) |
+
+Setup: copy `.env.example` → `.env`, set `APP_SECRET_KEY` (long random), optionally `APP_DATABASE_URL=postgresql+psycopg://…`
+(default SQLite in `app_data/`), pick `APP_AUTH_MODE` (`password` default; `oidc` with Streamlit `[auth]` secrets for
+Google sign-in; `none` for a private single-user machine). Migrate a V6 install with
+`.venv/bin/python scripts/migrate_v6_to_v7.py --email you@x.com --password …` (seeds the `.env` sheet/files/database as
+sources, imports `workspace_memory.json` per source, links the allowlisted WhatsApp numbers).
+
+Private Google Sheets: create a Google Cloud OAuth client (Web application, redirect URI `APP_BASE_URL/sources`), set
+`GOOGLE_OAUTH_CLIENT_ID/SECRET` and `APP_BASE_URL`; Data Sources → Google Sheet → *Connect another Google account*. The
+refresh token is stored encrypted, read via the Sheets API on the server, never sent to the browser or the LLM.
+
+Source freshness: sheets/databases reload after `SOURCE_TTL_SHEET/DB` seconds (300) on the next question; websites and
+files only on **Refresh**. Each card shows status and "last synced"; a failed refresh keeps the last good copy and says so.
+
+Tests: `tests/test_backend.py` (accounts, authorization A/B can't cross, sources survive logout/login/restart without
+network, conversations continue on another device, learning scope, encrypted credentials, WhatsApp link, OAuth with mocked
+HTTP, migration). Hosting note: Streamlit Community Cloud cannot run the WhatsApp/OAuth server or keep SQLite; use one
+VPS with Streamlit + `whatsapp_server.py` + PostgreSQL.
+
 ## Important
 Google Sheet URL must be public/viewable-by-link for the XLSX export method. Private Sheets require Google OAuth/service-account integration later.
 
@@ -200,7 +242,7 @@ user (web / WhatsApp)
 
 ### Tests
 ```bash
-.venv/bin/python -m pytest tests                 # 243 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
+.venv/bin/python -m pytest tests                 # 255 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
 RUN_LIVE=1 .venv/bin/python -m pytest tests/test_live_analyst.py    # real LLM incl. multi-source agent case
 .venv/bin/python tests/golden_real_sheet.py      # 34 golden questions on the real sheet + website, incl. a cross-sheet agent case
 ```

@@ -16,3 +16,5 @@ starlette>=0.40
 uvicorn>=0.30
 vl-convert-python>=1.6
 pytest>=8
+cryptography>=42
+# production database (optional): psycopg[binary]>=3.1

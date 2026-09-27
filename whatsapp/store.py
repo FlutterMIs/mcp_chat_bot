@@ -34,7 +34,7 @@ class Store:
         return {"last_plan": state.get("last_plan"), "history": state.get("history", []), "files": state.get("files", []),
                 "recent_plans": state.get("recent_plans", []), "focus": state.get("focus"), "pending_rule": state.get("pending_rule"),
                 "analysis": state.get("analysis"), "pending_choice": state.get("pending_choice"),
-                "last_result": state.get("last_result")}
+                "last_result": state.get("last_result"), "workspace": state.get("workspace")}
 
     def save(self, chat_key, state):
         with self._lock:

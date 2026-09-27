@@ -59,18 +59,24 @@ def test_internal_material_only_in_debug():
     assert "rows_matched" not in finalize(r, "top 5").answer
 
 
-def test_one_message_renders_one_table_and_one_chart_in_ui():
+def test_one_message_renders_one_table_and_one_chart_in_ui(monkeypatch):
     import os
     from streamlit.testing.v1 import AppTest
+    from backend import db
+    monkeypatch.setenv("APP_AUTH_MODE", "none")                                                # single-user local mode: no login screen
+    db.configure("sqlite://")
     at = AppTest.from_file(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py"), default_timeout=60)
     fr = finalize(Reply("Month-wise …", df=SERIES, chart={"type": "line", "x": "period", "y": "Customer Count"}, value=66.0, cards=[{"label": "Customer Count", "value": 66, "note": ""}, {"label": "Sales Amount", "value": 6600.0, "note": ""}], drillable="period", plan={"operation": "multi_metric"}), "last 12 months")
-    m = {"id": "a1", "role": "assistant", "content": fr.answer, "question": "q", "df": fr.table, "chart": fr.chart, "cards": fr.metrics, "drillable": fr.drilldown, "debug": {"trace": ["secret trace"]}}
+    m = {"id": "a1", "role": "assistant", "content": fr.answer, "question": "q", "df": fr.table, "debug": {"trace": ["secret trace"]},
+         "final_response": {"shape": fr.shape, "chart": fr.chart, "metrics": fr.metrics, "drilldown": fr.drilldown}}
     at.session_state.messages = [{"id": "u1", "role": "user", "content": "q"}, m]
     at.run()
-    assert not at.exception and len(at.dataframe) == 1 and len(at.get("vega_lite_chart")) == 1 and len(at.metric) == 2
+    assert not at.exception, at.exception
+    assert len(at.dataframe) == 1 and len(at.get("vega_lite_chart")) == 1 and len(at.metric) == 2
     assert not [e for e in at.expander if "Debug" in e.label]                                   # trace hidden without debug mode
     scalar = finalize(Reply("Total: ₹1,000", value=1000.0, metric="AMOUNT", plan={"title": "Total AMOUNT"}), "total")
-    at.session_state.messages = [{"id": "u1", "role": "user", "content": "q"}, {"id": "a2", "role": "assistant", "content": scalar.answer, "question": "q", "cards": scalar.metrics}]
+    at.session_state.messages = [{"id": "u1", "role": "user", "content": "q"}, {"id": "a2", "role": "assistant", "content": scalar.answer, "question": "q",
+                                                                                    "final_response": {"shape": "scalar", "metrics": scalar.metrics}}]
     at.run()
     assert not at.exception and len(at.dataframe) == 0 and len(at.get("vega_lite_chart")) == 0 and len(at.metric) == 1
 

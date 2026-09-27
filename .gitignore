@@ -10,3 +10,4 @@ workspace_memory.json
 .DS_Store
 audit_state_backup/
 llm_usage.jsonl
+app_data/

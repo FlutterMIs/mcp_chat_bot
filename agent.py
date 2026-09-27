@@ -16,8 +16,8 @@ from openrouter import compact_schema, reply_language
 from resultstore import ResultStore
 from semantics import validate_plan
 
-MAX_STEPS = 8            # LLM turns that run tools (a final forced "finish" turn is extra)
-MAX_TOOL_CALLS = 10
+MAX_STEPS = 6            # LLM turns that run tools (a final forced "finish" turn is extra)
+MAX_TOOL_CALLS = 8
 MAX_SECONDS = 45
 MAX_CONTEXT_CHARS = 160_000          # ≈ 40k tokens (estimate); transcript is trimmed before this
 

@@ -90,6 +90,14 @@ def mentioned_dimension(question, columns, measures=()):
         mt = {stem(t) for t in tokens(d)}
         if any(toks[i] in mt and ((i + 1 < len(toks) and toks[i + 1] in GROUP_STEMS) or (i > 0 and toks[i - 1] in GROUP_STEMS)) for i in range(len(toks))):
             return d
+    if grouping:           # "customer wise" on a table whose column is PARTY NAME: the entity synonyms decide
+        from semantics import dimension_for_entity
+        for i, t in enumerate(toks):
+            ent = _SYN_OF.get(t)
+            if ent and ((i + 1 < len(toks) and toks[i + 1] in GROUP_STEMS) or (i > 0 and toks[i - 1] in GROUP_STEMS)):
+                d = dimension_for_entity(ent, columns)
+                if d is not None:
+                    return d["name"]
     return None
 
 

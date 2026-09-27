@@ -42,6 +42,26 @@ class FinalResponse:
     date_range: str | None = None              # "2026-08-01 → 2026-09-27" — the resolved period the result covers
     period: dict | None = None                 # canonical period metadata (expression, reference date, periods)
 
+    @property
+    def answer_type(self):
+        return self.shape
+
+    @property
+    def date_info(self):
+        return {"date_range": self.date_range, **(self.period or {})} if (self.date_range or self.period) else None
+
+    @property
+    def tables(self):
+        return [self.table] if self.table is not None else []
+
+    @property
+    def charts(self):
+        return [self.chart] if self.chart else []
+
+    @property
+    def drilldown_options(self):
+        return [self.drilldown] if self.drilldown else []
+
 
 def _numeric_cols(df):
     return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]

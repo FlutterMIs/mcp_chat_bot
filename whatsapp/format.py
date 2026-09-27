@@ -176,4 +176,4 @@ HELP = ("🤖 *Business Analyst*\n\n"
         "• 2026 mein total sales kitni hui?\n• customer wise dikhao\n• top 5 ka graph bana do\n• 2025 aur 2026 compare karo\n\n"
         "Graph apne aap aata hai; type chahiye to bolo: \"pie chart mein\", \"line graph\", \"bar chart\".\n\n"
         "Data jodne ke liye: Excel/CSV/PDF bhejo, ya Google Sheet / website ka link bhejo.\n\n"
-        "*Commands*\n/help — ye message\n/status — kaunsa data connected hai\n/reset — is chat ki baat-cheet bhool jao (data safe rehta hai)")
+        "*Commands*\n/help — ye message\n/status — kaunsa data connected hai\n/link <code> — web app ke workspace se jodo (Settings → Generate link code)\n/reset — is chat ki baat-cheet bhool jao (data safe rehta hai)")

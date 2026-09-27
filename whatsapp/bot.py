@@ -137,7 +137,33 @@ class Sources:
     def _register(self, sid, spec):
         kind, target = spec
         try:
-            if kind == "sheet":
+            if kind == "registry":
+                # A source saved in the workspace (backend.sources): register its parsed data directly (in-process tools)
+                # or, over MCP stdio, by URL/path so the tool server loads it itself.
+                from backend.sources import SourceRegistry
+                src = target
+                server = getattr(self.tools, "server", None)
+                if server is not None:
+                    reg = SourceRegistry()
+                    schemas, errors = reg.ensure(server, src["workspace_id"], source_ids=[sid])
+                    if sid not in schemas:
+                        raise SourceUnavailable(f"{src['name']}: {errors.get(sid, 'load failed')}")
+                    schema = schemas[sid]
+                else:
+                    cfg = src["connection_config"]
+                    if src["type"] == "google_sheet" and src.get("auth_mode") != "oauth":
+                        schema = self.tools.call("register_google_sheet", {"source_id": sid, "url": cfg["url"]})
+                    elif src["type"] == "website":
+                        schema = self.tools.call("register_web", {"source_id": sid, "url": cfg["url"]})
+                    elif src["type"] == "file":
+                        schema = self.tools.call("load_file", {"source_id": sid, "path": cfg["storage_path"]})
+                    elif src["type"] == "database":
+                        from backend import credentials
+                        schema = self.tools.call("register_database", {"source_id": sid, "url": credentials.reveal(src["workspace_id"], src["credential_id"])["url"]})
+                    else:
+                        raise SourceUnavailable(f"{src['name']}: private Google Sheets need WHATSAPP_TOOL_TRANSPORT=local")
+                schema = dict(schema, name=src["name"])
+            elif kind == "sheet":
                 schema = self.tools.call("register_google_sheet", {"source_id": sid, "url": target})
             elif kind == "web":
                 schema = self.tools.call("register_web", {"source_id": sid, "url": target})
@@ -231,9 +257,19 @@ class WhatsAppBot:
             return "group"
         if msg.message_type in IGNORED_TYPES:
             return f"type_{msg.message_type}"
-        if "*" not in self.cfg.allowed_numbers and not _allowed({sender, _digits(msg.sender_id)}, self.cfg.allowed_numbers):
+        if "*" not in self.cfg.allowed_numbers and not _allowed({sender, _digits(msg.sender_id)}, self.cfg.allowed_numbers) and not self._linked(sender):
             return "not_allowlisted"
         return None
+
+    def _linked(self, sender):
+        """A number linked to a workspace in the web app (Settings → link code) is allowed without the .env allowlist."""
+        if not sender:
+            return False
+        try:
+            from backend import whatsapp_link
+            return whatsapp_link.workspace_for(sender) is not None
+        except Exception:
+            return False
 
     def _lid_phone(self, wid):
         """WhatsApp may identify senders by an @lid privacy id instead of their number; ask OpenWA to map it."""
@@ -259,6 +295,7 @@ class WhatsAppBot:
         t0 = time.time()
         self._typing(msg.chat_id, "typing")
         try:
+            self._bind_workspace(msg, state)
             question, voice_in = msg.text, False
             if question.startswith("/"):
                 return self.command(msg, key, state, question)
@@ -291,9 +328,33 @@ class WhatsAppBot:
 
     def chat_specs(self, state):
         specs = dict(self.sources.defaults)
+        ws = (state.get("workspace") or {}).get("workspace_id")
+        if ws:
+            try:
+                from backend.sources import SourceRegistry
+                for src in SourceRegistry().list(ws, include_disabled=False):
+                    if src["status"] in ("connected", "error"):
+                        specs[src["id"]] = ("registry", src)
+            except Exception as e:
+                log("registry_failed", level="warning", error=f"{type(e).__name__}: {str(e)[:120]}")
         for f in state.get("files", []):
             specs[f["sid"]] = (f.get("kind", "file"), f.get("target") or f["path"])
         return specs
+
+    def _bind_workspace(self, msg, state):
+        """A phone linked in the web app (Settings → /link code) works with that workspace's sources and learning."""
+        if state.get("workspace") is None:
+            try:
+                from backend import whatsapp_link
+                sender = _digits(msg.sender_phone) or self._lid_phone(msg.sender_id) or _digits(msg.sender_id)
+                state["workspace"] = whatsapp_link.workspace_for(sender) or {}
+            except Exception as e:
+                log("workspace_lookup_failed", level="warning", error=f"{type(e).__name__}: {str(e)[:120]}")
+                state["workspace"] = {}
+        ws = (state.get("workspace") or {}).get("workspace_id")
+        import memory
+        memory.set_scope(ws, (state.get("workspace") or {}).get("user_id"))
+        return ws
 
     def ask(self, msg, key, state, question):
         try:
@@ -579,6 +640,24 @@ class WhatsAppBot:
             if keep:
                 self.store.save(key, {"files": keep})
             return self.send(msg.chat_id, "🧹 Is chat ki baat-cheet reset kar di." + (" Bheji hui files bhi hata di." if not keep and state.get("files") else " Business data aur files safe hain."))
+        if cmd == "/link":
+            parts = text.split()
+            if len(parts) < 2:
+                return self.send(msg.chat_id, "Web app → Settings → *Generate link code*, phir yahan `/link <code>` bhejo.")
+            try:
+                from backend import whatsapp_link
+                sender = _digits(msg.sender_phone) or self._lid_phone(msg.sender_id) or _digits(msg.sender_id)
+                linked = whatsapp_link.link(parts[1], sender)
+                state["workspace"] = linked
+                self.store.save(key, state)
+                self.sources.schemas.clear(); self.sources._loaded_at.clear()
+                return self.send(msg.chat_id, "✅ Ye number aapke workspace se jud gaya. Ab aapke saved data sources yahan bhi chalenge — /status dekho.")
+            except ValueError as e:
+                return self.send(msg.chat_id, f"❌ {e}")
+        if cmd == "/unlink":
+            state["workspace"] = {}
+            self.store.save(key, state)
+            return self.send(msg.chat_id, "Workspace link hata diya. Ab default data use hoga.")
         if cmd == "/status":
             try:
                 schemas = self.sources.ensure(self.chat_specs(state))

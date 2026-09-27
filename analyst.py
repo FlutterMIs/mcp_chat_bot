@@ -748,23 +748,27 @@ def _likely_table(conv, question):
         if schema.get("kind") not in (None, "table", "workbook"):
             continue
         tables = schema.get("sheets") or ([{"name": None, "columns": schema.get("columns", [])}] if schema.get("columns") else [])
+        src_bonus = 2 * len(qt & stems(str(schema.get("name") or ""))) if len(tables) > 1 else 0   # "Sales 2026" names the source, not one of its tabs
         for t in tables:
             label = t.get("name") or str(schema.get("name") or sid)
-            sc = 2 * len(qt & (stems(label) | stems(str(schema.get("name") or "")))) + sum(len(qt & stems(c["name"])) for c in t.get("columns", []))
-            ranked.append((sc, sid, t.get("name"), label, t))
+            tab_sc = 2 * len(qt & stems(label)) + sum(len(qt & stems(c["name"])) for c in t.get("columns", []))
+            ranked.append((tab_sc + src_bonus, sid, t.get("name"), label, t, tab_sc))
     ranked.sort(key=lambda x: -x[0])
     if not ranked:
         return None, []
     if len(ranked) == 1:
-        sc, sid, name, label, t = ranked[0]
+        sc, sid, name, label, t, _ = ranked[0]
         return (sid, name, t), []
-    best = ranked[0][0]
-    close = [(sid, label, t) for sc, sid, name, label, t in ranked[:4] if sc > 0 and sc * 2 >= best]
+    best, best_sid, best_tab = ranked[0][0], ranked[0][1], ranked[0][5]
+    # tabs of the same source compete on their own words only (the shared source name cannot break their tie)
+    close = [(sid, label, t) for sc, sid, name, label, t, tab in ranked[:4] if sc > 0 and ((sid != best_sid and sc * 2 >= best) or (sid == best_sid and tab > 0 and tab * 2 >= best_tab))]
+    if best_tab == 0 and ranked[0][0] > 0 and len([x for x in ranked if x[1] == best_sid]) > 1:
+        close = [(sid, label, t) for sc, sid, name, label, t, tab in ranked[:4] if sid == best_sid]                     # only the source matched: its tabs tie
     if len(close) > 1:
         return None, close
     if best == 0:
         return None, []
-    sc, sid, name, label, t = ranked[0]
+    sc, sid, name, label, t, _ = ranked[0]
     return (sid, name, t), []
 
 
