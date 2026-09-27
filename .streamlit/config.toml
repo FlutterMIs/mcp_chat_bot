@@ -1,0 +1,10 @@
+# Web app binds to this machine only. To open it from another device on your network, change the
+# address to "0.0.0.0" — and then put a password/reverse proxy in front, because the app has no login.
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = true
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false

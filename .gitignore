@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+whatsapp_state.db*
+whatsapp_files/
+.pytest_cache/
+whatsapp_debug.json
+whatsapp_shared/
+workspace_memory.json
+.DS_Store
+audit_state_backup/
+llm_usage.jsonl
