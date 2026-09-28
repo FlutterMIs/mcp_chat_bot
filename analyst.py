@@ -391,7 +391,10 @@ def answer(conv, question, api_key, model, tools, log=None):
         resolved = resolve_choice(conv, question, api_key, model, tools, log)
         if resolved is not None:
             return resolved
-    understood = understood_reply(conv, question, tools, log)
+    try:
+        understood = understood_reply(conv, question, tools, log)
+    except ValueError as e:
+        understood = no_data_reply(conv, tools, e, log)       # a typed value that exists nowhere → one clear line, never a raw tool error
     if understood is not None:
         return _done(conv, question, understood)
     names = [re.split(r"\s[–|-]\s", str(s.get("name") or sid))[0][:40] for sid, s in conv.schemas.items()]
@@ -419,13 +422,17 @@ def answer(conv, question, api_key, model, tools, log=None):
     from agent import classify, run_agent   # local import: agent.py imports Reply/chart_hint from this module
     all_cols = [c for s in conv.schemas.values() for t in (s.get("sheets") or [{"columns": s.get("columns", [])}]) for c in t.get("columns", [])]
     wanted = requested_measures(question, all_cols)
+    if classify(question, conv.schemas) == "complex":
+        # Spans two sheets ("… sale amount … aur abhi kitna closing stock hai") or documents: the bounded agent joins them.
+        log("route_agent")
+        return _done(conv, question, run_agent(conv, question, api_key, model, tools, log=log, requested=wanted if len(wanted) >= 2 else None))
     if len(wanted) >= 2 and not ctx.get("correction_of"):
         # Several metrics: the planner only supplies source/dates/grouping (1 cheap call); everything else is code.
         log("route_multi_metric", measures=[w["kind"] + (":" + w["entity"] if w["entity"] else "") for w in wanted])
-        return _done(conv, question, multi_metric_answer(conv, question, wanted, ai, ctx, tools, log))
-    if classify(question, conv.schemas) == "complex":
-        log("route_agent")
-        return _done(conv, question, run_agent(conv, question, api_key, model, tools, log=log))
+        try:
+            return _done(conv, question, multi_metric_answer(conv, question, wanted, ai, ctx, tools, log))
+        except ValueError as e:
+            return _done(conv, question, no_data_reply(conv, tools, e, log) or Reply(f"⚠️ Data se ye jawab nahi nikal paaya: {str(e)[:200]}", kind="clarify"))
 
     def make_plan():
         raw = ai.plan(question, ctx)
@@ -690,7 +697,8 @@ def understood_reply(conv, question, tools, log):
     ent_table = table if state else (pick[2] if pick else None)
     entity, q_intent = None, question
     from understanding import SHOW_ITEMS
-    if ent_sid and ent_table and not only_known_words(question, cols, sheet_names) and not SHOW_ITEMS.search(question):   # "kon kon … karta hai" lists rows: the planner's job
+    from entity_filter import unknown_spans
+    if ent_sid and ent_table and unknown_spans(question, cols, sheet_names) and not SHOW_ITEMS.search(question):   # "kon kon … karta hai" lists rows: the planner's job
         try:
             entity = find_entity_filter(question, ent_sid, ent_table, tools, sheet_names)
         except AmbiguousValue as e:
@@ -700,6 +708,12 @@ def understood_reply(conv, question, tools, log):
         if entity:
             q_intent = strip_span(question, entity["typed"])
             log("entity_filter", column=entity["column"], value=entity["value"], typed=entity["typed"])
+        else:
+            from entity_filter import filter_like_spans
+            missing = filter_like_spans(question, cols, sheet_names)
+            if missing:
+                # "mobile ki sale" when nothing is called mobile anywhere: say so — never answer without the filter
+                raise ValueError(f'Value "{missing[0]}" not found in column "{ent_table.get("name") or ent_sid}"')
     intent = understand(q_intent, cols, state)
     if entity:
         intent["entity_filter"] = entity
@@ -712,7 +726,7 @@ def understood_reply(conv, question, tools, log):
         return Reply(f"📄 Report taiyar hai: *{name}* — summary (source, date range, calculation, totals) + data sheet.", kind="report",
                      files=[{"name": name, "bytes": data, "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}], df=conv.last_result, plan=conv.last_plan)
     metric_swap = bool(intent["metrics"]) and intent["metrics"] != (state.get("metrics") or []) and only_known_words(q_intent, cols)
-    filters = merge_filters(state.get("filters"), entity) if entity else list(state.get("filters") or [])
+    filters = merge_filters(state.get("filters"), entity, additive=bool(intent.get("additive")) or bool(re.search(r"\b(usme|unme|isme|inme|us ?mein|in ?mein)\b", question, re.I))) if entity else list(state.get("filters") or [])
     if state and intent.get("collapse"):
         # SERIES → TOTAL ("total kar ke batao", "only total"): same source, period, filters and metric; one number, no split.
         new_state = {**state, "period": intent["period"] or {}, "grain": None, "group_by": [], "metrics": intent["metrics"] or state.get("metrics") or [],
@@ -992,6 +1006,38 @@ def attach_entity_images(reply, question, limit=12):
             images.append({"alt": " · ".join(str(r[l]) for l in labels[:2] if str(r.get(l, "")).strip()) or url, "url": url})
     reply.images = images
     return reply
+
+
+NO_VALUE = re.compile(r'(?:No rows contain|Value) "(?P<value>[^"]+)" (?:in|not found in) column "(?P<column>[^"]+)"')
+
+
+def no_data_reply(conv, tools, error, log=None):
+    """A filter value that is not in the data ("mobile" when no item is called that): say so plainly, list the closest
+    real values (from the tools, never invented), and never answer from another value or period."""
+    m = NO_VALUE.search(str(error))
+    if not m:
+        raise error
+    value, column = m.group("value"), m.group("column")
+    from entities import match_entity
+    close = []
+    for sid, schema in conv.schemas.items():
+        for t in schema.get("sheets") or [{"name": None, "columns": schema.get("columns", [])}]:
+            for c in t.get("columns", []):
+                if c.get("role") != "dimension" or (c.get("distinct_count") or 0) > 5000:
+                    continue
+                try:
+                    vals = [v["value"] for v in tools.call("distinct_values", {"source_id": sid, "column": c["name"], "limit": 5000} | ({"sheet_name": t["name"]} if t.get("name") else {})).get("values") or []]
+                except Exception:
+                    continue
+                mm = match_entity(vals, value, cutoff=0.6)
+                for cand in mm["candidates"][:3]:
+                    close.append((cand["score"], f"{cand['value']} ({c['name']})"))
+    close = [x for _, x in sorted(set(close), key=lambda x: -x[0])][:5]
+    if log:
+        log("no_data_value", value=value, column=column, suggestions=len(close))
+    text = f"“{value}” naam ki koi entry *{column}* mein nahi mili, isliye is par koi number nahi hai."
+    text += ("\nMilte-julte naam: " + " · ".join(close) + " — inme se koi chahiye to wahi naam likh do.") if close else "\nSahi naam (jaise data mein likha hai) ke saath dobara pucho."
+    return Reply(text, kind="no_data")
 
 
 def _replace_value(question, typed, real):

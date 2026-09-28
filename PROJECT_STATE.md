@@ -69,13 +69,14 @@ point `memory.MEMORY_FILE` elsewhere — never leave test mappings in it.
 - Vocabulary (`semantics.py`): seller/saler/salesman → employee entity; state/category entities; "items sold" (`SOLD_CUES`) = quantity; "transaction count" = distinct invoice/voucher id, else row count (`Transaction Count`).
 - Real sheet offline: the golden question ("… date mont wise … top saler usak sale amount … total items sale count") → asks TIMESTAMP vs VOUCHER DATE once → Apr–Sep top seller per month with Sales Amount + Items Count, no ₹ on items.
 - `entity_filter.py` (V9.1): entity words ("jsp trader ki …", "Dilip ki sales", "Delhi ki sales") are matched in code against the REAL distinct values of the table's dimension columns (`distinct_values` tool + `entities.match_entity`) BEFORE the planner — one clear match → a filter on the deterministic path, a tie → chips, nothing → planner as before. "kon kon … karta hai" (row lists) still goes to the planner. Month series can carry `Previous …`, `Change`, `Change %` columns when the question says difference/growth (`state["mom"]`).
-- Tests: `tests/test_v9_analytics.py` (spec items 1-25 + sequences A/B/C + result-check rules + entity filters).
+- V9.2: a typed entity that exists nowhere ("mobile ki sale" when no item/group is called mobile) is a `no_data` reply with close real values — never an unfiltered answer, never a raw tool error (`analyst.no_data_reply`, `entity_filter.filter_like_spans` = unknown span + ki/ka/ke/wale). A new entity is a fresh question (old entity filters dropped) unless the message is additive ("… bhi", "usme"). Questions spanning two sheets (sales + closing stock) go to the agent BEFORE the multi-metric shortcut.
+- Tests: `tests/test_v9_analytics.py` (spec items 1-25 + sequences A/B/C + result-check rules + entity filters + no-data).
 
 ## 7. Testing pattern
 - Offline, no LLM: `monkeypatch.setattr(analyst, "OpenRouterAI", NoLLM)` (planner/wording raise if called), fixed
   reference date via `monkeypatch.setattr("understanding.date", date)` **and** `monkeypatch.setattr("periods.date", date)`.
 - Planner-path tests use a fake planner class returning a fixed plan (`tests/test_multi_metric.py::planner`).
-- Run: `.venv/bin/python -m pytest tests -q -p no:cacheprovider -W ignore` (304 pass, 16 live tests skipped).
+- Run: `.venv/bin/python -m pytest tests -q -p no:cacheprovider -W ignore` (306 pass, 16 live tests skipped).
 - Backend tests: `platform` fixture in `tests/test_backend.py` (in-memory DB via `db.configure("sqlite://")`, `DATA_DIR` in tmp, `APP_SECRET_KEY` set). UI: `APP_AUTH_MODE=none` for `AppTest`.
 - Real sheet offline check: register the sheet with `MCPServer().register_google_sheet` and run the conversation with NoLLM
   (see `tests/test_periods_context.py::test_acceptance_conversation` for the exact turns).

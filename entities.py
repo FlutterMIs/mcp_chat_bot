@@ -33,8 +33,10 @@ def _score(want, cand):
     if not a or not b:
         return 0.0
     r = difflib.SequenceMatcher(None, a, b).ratio()
-    if a in b or b in a:      # "ravi" typed for "ravikumar": a whole-word prefix/part is a strong match, longer part = stronger
-        r = max(r, 0.85 + 0.15 * min(len(a), len(b)) / max(len(a), len(b)))
+    # "ravi" typed for "ravikumar": what the user typed is a whole part of the real value → strong match, longer part =
+    # stronger. The other way round ("30" is a fragment of "Code- 8030") is NOT a match.
+    if a in b and len(a) >= 3 and len(a) / len(b) >= 0.12:
+        r = max(r, 0.85 + 0.15 * len(a) / len(b))
     return r
 
 

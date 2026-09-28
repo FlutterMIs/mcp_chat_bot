@@ -242,7 +242,7 @@ user (web / WhatsApp)
 
 ### Tests
 ```bash
-.venv/bin/python -m pytest tests                 # 304 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
+.venv/bin/python -m pytest tests                 # 306 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
 RUN_LIVE=1 .venv/bin/python -m pytest tests/test_live_analyst.py    # real LLM incl. multi-source agent case
 .venv/bin/python tests/golden_real_sheet.py      # 34 golden questions on the real sheet + website, incl. a cross-sheet agent case
 ```

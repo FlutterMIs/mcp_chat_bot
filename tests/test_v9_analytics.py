@@ -275,12 +275,12 @@ def test_19_20_grand_total_vs_displayed_top_n_total(biz):
                                     "group_by": ["CUSTOMER NAME"], "sort": "desc", "top_n": 1, "filters": [{"column": "STATE", "op": "eq", "value": "Delhi"}]})
     import entity_filter
     monkeypatch_none = lambda *a, **k: None
-    orig = entity_filter.find_entity_filter
-    entity_filter.find_entity_filter = monkeypatch_none                                       # force the planner path for this check
+    orig, orig2 = entity_filter.find_entity_filter, entity_filter.filter_like_spans
+    entity_filter.find_entity_filter, entity_filter.filter_like_spans = monkeypatch_none, lambda *a, **k: []   # force the planner path for this check
     try:
         r, fr = ask(Conversation(schemas=c.schemas), t, "Delhi ka top party by amount")     # (Delhi has 2 customers; top 1 is a cut)
     finally:
-        entity_filter.find_entity_filter = orig
+        entity_filter.find_entity_filter, entity_filter.filter_like_spans = orig, orig2
     delhi = float(SALES[SALES["STATE"] == "Delhi"]["AMOUNT"].sum())
     assert r.plan["operation"] == "aggregate" and fr.totals["cut"] and fr.totals["all"]["AMOUNT"] == delhi and fr.totals["displayed"]["AMOUNT"] == float(fr.table["value"].sum()) < delhi
 
@@ -378,3 +378,20 @@ def test_entity_filter_resolves_typed_customer_without_the_planner(monkeypatch, 
     assert fr.value == float(s2[s2["STATE"] == "Delhi"]["AMOUNT"].sum())
     with pytest.raises(AssertionError, match="planner"):                        # "kon kon … karta hai" is a row list → planner
         ask(Conversation(schemas=c.schemas), t, "Item0 kon kon kharidta hai")
+
+
+# ---------------------------------------------------------------- V9.2 a value that exists nowhere → clear no-data reply; cross-sheet → agent
+def test_missing_entity_gives_no_data_reply_never_an_unfiltered_answer(biz):
+    c, t, srv = biz
+    r, fr = ask(c, t, "mobile last year ki sale chahiye month wise customer wise amount aur items")
+    assert fr.kind == "no_data" and "mobile" in fr.answer and fr.table is None and fr.value is None
+    r, fr = ask(Conversation(schemas=c.schemas), t, "Kilo wale ki sales")
+    assert fr.kind == "answer" and r.plan["filters"][0]["value"] == "Kilo"
+    # the multi-metric path: a planner filter on a value that does not exist is also a no-data reply with suggestions
+    analyst.OpenRouterAI = planner({"status": "execute", "mode": "data", "source_id": "biz", "sheet_name": "SALES", "operation": "aggregate", "metric": "AMOUNT", "aggregation": "sum",
+                                    "group_by": ["CUSTOMER NAME"], "filters": [{"column": "CUSTOMER NAME", "op": "eq", "value": "Zorblax Traders"}]})
+    r, fr = ask(Conversation(schemas=c.schemas), t, "Zorblax Traders ka sale amount aur qty customer wise")
+    assert fr.kind == "no_data" and "Zorblax Traders" in fr.answer and "❌" not in fr.answer
+    from agent import classify
+    q = "mobile last year ki sale month wise client name amount items sold aur abhi kitna closing stock hai"
+    assert classify(q, c.schemas) == "complex"                       # SALES + INVENTORY → the agent, not the multi-metric shortcut
