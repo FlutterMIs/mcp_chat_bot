@@ -242,10 +242,22 @@ user (web / WhatsApp)
 
 ### Tests
 ```bash
-.venv/bin/python -m pytest tests                 # 282 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
+.venv/bin/python -m pytest tests                 # 304 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
 RUN_LIVE=1 .venv/bin/python -m pytest tests/test_live_analyst.py    # real LLM incl. multi-source agent case
 .venv/bin/python tests/golden_real_sheet.py      # 34 golden questions on the real sheet + website, incl. a cross-sheet agent case
 ```
+
+## V9 — natural-language analytics engine (2026-09-28)
+
+- **Top-N global vs per group:** "top 5 customers" (global) · "month wise top seller" / "har month ke top 3 seller" (per month) · "har state ke top 5 customer" (per state). Deterministic group ranking, never sort-all + head.
+- **Multi-metric, ranked by the money column:** "top seller ki sale amount aur items sold" → rank by SUM(AMOUNT), show AMOUNT + QTY (+ distinct customer count when asked).
+- **Business vocabulary:** seller/saler/salesman → the SALES PERSON-like column; items sold/units → QTY; customer/party/client → the customer column; transaction count → invoice ids or rows. Schema stays the truth: nothing is invented.
+- **Smart clarification:** "top seller" does not ask "kis basis par"; explicit metrics/periods are never re-asked; two date columns are asked once and remembered.
+- **Follow-ups:** "top seller batao" → "amount bhi" → "items bhi"; "month wise sales" → "top seller bhi bata" → "uska amount aur quantity"; "September sales" → "top 5 customer" → "amount ke saath".
+- **Comparisons / share:** "this month vs last month", "pichhle month se kitna difference hai", "this year vs last year" → both totals + difference + % change computed in code; "category wise share" → Share % of the all-data total.
+- **Totals:** every grouped table carries a totals block — **Grand Total** (all data) or **Displayed Top N Total** (only the shown rows), never confused; UI shows the Total row and "Total Records".
+- **Charts:** built from the result DataFrame only, validated (`chart_check`): text fields never on a numeric axis; top-seller-by-month = month on X, amount on Y, seller as colour. Month labels display as Sep-26 while the data stays ISO.
+- **Golden question** ("bhai mujhe … date month wise … top saler usak sale amount … total items sale count") → one coherent table: Month · Sales Person · Sales Amount · Items Count, chronological, no ₹ on counts.
 
 ## V8 — Prompt Builder, safe entity matching, pivots, exports, optional RAG (2026-09-28)
 

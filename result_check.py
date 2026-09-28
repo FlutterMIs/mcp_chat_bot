@@ -64,6 +64,27 @@ def problems(reply, schemas):
     a, b = plan.get("date_from"), plan.get("date_to")
     if a and b and re.match(r"^\d{4}-\d{2}-\d{2}", str(a)) and re.match(r"^\d{4}-\d{2}-\d{2}", str(b)) and str(a)[:10] > str(b)[:10]:
         out.append(f"date range is reversed ({a} → {b})")
+    # Ranking scope: "top N per month/state" must never show more than N rows per scope value
+    df = reply.df
+    scope, n = plan.get("rank_scope"), plan.get("top_n")
+    if scope and n and df is not None and len(df) and scope in df.columns and not getattr(reply, "pivot", False):
+        worst = int(df.groupby(scope).size().max())
+        if worst > int(n):
+            out.append(f"ranking scope '{scope}' shows {worst} rows for one value, more than top {n}")
+    # Totals: the displayed total must equal the sum of the shown rows (the all-data total may differ, that is the point)
+    totals = getattr(reply, "totals", None)
+    if totals and df is not None and len(df):
+        for col, v in (totals.get("displayed") or {}).items():
+            src = col if col in df.columns else ("value" if "value" in df.columns else None)
+            if src is not None:
+                shown = float(pd.to_numeric(df[src], errors="coerce").sum())
+                if abs(shown - float(v)) > 0.01 * max(abs(shown), 1):
+                    out.append(f"displayed total for '{col}' does not match the table")
+        if not totals.get("cut"):
+            for col, v in (totals.get("all") or {}).items():
+                d = (totals.get("displayed") or {}).get(col)
+                if d is not None and abs(float(d) - float(v)) > 0.01 * max(abs(float(v)), 1):
+                    out.append(f"grand total for '{col}' differs from the displayed rows although nothing was cut")
     if reply.value is not None and not (isinstance(reply.value, (int, float)) and math.isfinite(float(reply.value))):
         out.append("scalar answer has no finite value")
     df = reply.df

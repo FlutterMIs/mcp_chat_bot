@@ -64,7 +64,10 @@ def default_chart(df, hint=None, metric=None):
     if df is None or df.empty or len(df.columns) < 2:
         return None
     if hint and hint.get("x") in df.columns and hint.get("y") in df.columns and df[hint["x"]].nunique() >= 2:
-        return {"type": hint.get("type", "bar"), "x": hint["x"], "y": hint["y"]}
+        out = {"type": hint.get("type", "bar"), "x": hint["x"], "y": hint["y"]}
+        if hint.get("color") in df.columns and hint["color"] not in (hint["x"], hint["y"]):
+            out["color"] = hint["color"]                     # e.g. month on X, amount on Y, the winning salesperson as colour
+        return out
     asked = (hint or {}).get("type") if (hint or {}).get("type") in CHART_TYPES else None
     nums = _numeric_cols(df)
     if not nums:
@@ -82,15 +85,19 @@ def default_chart(df, hint=None, metric=None):
     return {"type": asked or "bar", "x": x, "y": y}
 
 
-def _prepare(df, x, y, kind):
-    c = df[[x, y]].copy() if x != y else df[[x]].copy()
+def _prepare(df, x, y, kind, color=None):
+    cols = [x, y] if x != y else [x]
+    if color and color in df.columns and color not in cols:
+        cols.append(color)
+    c = df[cols].copy()
     c[y] = pd.to_numeric(c[y], errors="coerce")
     c = c.dropna(subset=[y])
     if kind == "scatter":
         return c
-    # Detail rows repeat the same label: sum them so each label gets one bar/slice/point.
-    if c[x].duplicated().any():
-        c = c.groupby(x, as_index=False, sort=False)[y].sum()
+    # Detail rows repeat the same label: sum them so each label gets one bar/slice/point (per colour series when given).
+    keys = [x] + ([color] if color and color in c.columns else [])
+    if c.duplicated(subset=keys).any():
+        c = c.groupby(keys, as_index=False, sort=False)[y].sum()
     if kind in ("pie", "donut") and len(c) > PIE_MAX_SLICES:
         c = c.sort_values(y, ascending=False)
         top, rest = c.iloc[: PIE_MAX_SLICES - 1], c.iloc[PIE_MAX_SLICES - 1 :]
@@ -98,7 +105,7 @@ def _prepare(df, x, y, kind):
     return c
 
 
-def _build(c, x, y, kind):
+def _build(c, x, y, kind, color=None):
     # Full dates (2026-01-05) get a time axis; periods like "2026-01" or "2026" stay ordered labels,
     # otherwise Vega places them at midnight UTC and months drift across the axis.
     full_dates = pd.api.types.is_datetime64_any_dtype(c[x]) or (c[x].astype(str).str.len().min() >= 10 and _is_datelike(c[x]))
@@ -119,6 +126,9 @@ def _build(c, x, y, kind):
     mark = {"bar": base.mark_bar(), "line": base.mark_line(point=True), "area": base.mark_area(opacity=0.7), "scatter": base.mark_circle(size=70)}[kind]
     angle = -40 if xtype == "N" and kind == "bar" else (0 if xtype == "O" else None)
     xenc = alt.X(f"{x}:{xtype}", title=str(x), sort=None, axis=alt.Axis(labelAngle=angle) if angle is not None else alt.Undefined)
+    if color and color in c.columns and color not in (x, y):
+        tip.append(alt.Tooltip(f"{color}:N", title=str(color)))
+        return mark.encode(x=xenc, y=alt.Y(f"{y}:Q", title=str(y)), color=alt.Color(f"{color}:N", title=str(color)), tooltip=tip)
     return mark.encode(x=xenc, y=alt.Y(f"{y}:Q", title=str(y)), tooltip=tip)
 
 
@@ -147,11 +157,12 @@ def draw_selected_chart(df, msg_id):
     if x == y and kind != "scatter":
         st.caption("Label aur value ke liye alag columns choose karo.")
         return
-    c = _prepare(df, x, y, kind)
+    color = st.session_state.get(f"chart_color_{msg_id}")
+    c = _prepare(df, x, y, kind, color)
     if c.empty:
         st.caption(f"'{y}' column mein chart ke liye numbers nahi mile.")
         return
-    st.altair_chart(_build(c, x, y, kind), key=f"chart_{msg_id}")
+    st.altair_chart(_build(c, x, y, kind, color), key=f"chart_{msg_id}")
 
 
 def render_png(df, hint=None, metric=None, title=None, kind=None):
@@ -168,11 +179,12 @@ def render_png(df, hint=None, metric=None, title=None, kind=None):
     x, y = auto["x"], auto["y"]
     if x == y:
         return None
-    c = _prepare(df, x, y, kind)
+    color = auto.get("color")
+    c = _prepare(df, x, y, kind, color)
     if c.empty:
         return None
     # An image can't be hovered, so print the numbers on the chart itself.
-    chart = _build(c, x, y, kind) + _value_labels(c, x, y, kind)
+    chart = _build(c, x, y, kind, color) + _value_labels(c, x, y, kind)
     chart = (chart
              .properties(width=640, height=360, title=title or "")
              .configure(background="white")

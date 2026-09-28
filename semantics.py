@@ -274,6 +274,8 @@ def requested_measures(question, columns):
             item = ("monetary", None)
         elif t in qty_s:
             item = ("quantity", None)
+        elif t in ITEM_LIKE and any(x in SOLD_CUES for x in toks[max(0, i - 2):i + 3]):
+            item = ("quantity", None)                                  # "items sold" / "units bike" = the quantity column
         elif (t in dims or t in _SYN_OF) and not (i + 1 < len(toks) and toks[i + 1] in GROUP_STEMS) and (
                 any(x in COUNT_CUES for x in toks[max(0, i - 3):i + 3]) or any(x in {"total", "sum", "kul"} for x in toks[max(0, i - 1):i + 2])):
             item = ("count", entity_of(t) if t in _SYN_OF else t)     # "customer count" / "total items" — but not "customer wise"
@@ -288,15 +290,19 @@ def requested_measures(question, columns):
 
 
 ITEM_LIKE = {"item", "product", "unit", "piece", "pc", "good", "maal", "saman", "sku", "article", "qty", "quantity"}
+SOLD_CUES = {"sold", "sell", "sale", "bika", "bike", "biki", "bech", "becha", "beche", "nikla", "nikle", "nikli", "dispatched", "shipped"}
 # What users call an entity vs what a column may be called. Concepts, not business columns.
 ENTITY_SYNONYMS = {
     "customer": {"customer", "party", "client", "buyer", "account", "consumer", "dealer", "distributor", "retailer", "grahak", "graahak"},
     "item": ITEM_LIKE - {"qty", "quantity"},
-    "employee": {"employee", "staff", "worker", "agent", "salesman", "salesperson", "executive", "karmchari", "person"},
+    "employee": {"employee", "staff", "worker", "agent", "salesman", "salesmen", "salesperson", "salespersons", "seller", "sellers", "saler", "salers",
+                 "executive", "karmchari", "person", "rep", "representative"},
     "student": {"student", "pupil", "learner", "vidyarthi"},
     "vendor": {"vendor", "supplier"},
     "city": {"city", "town", "location", "place", "shahar", "shehar"},
-    "order": {"order", "invoice", "bill", "voucher", "transaction"},
+    "state": {"state", "rajya", "pradesh", "region", "zone"},
+    "category": {"category", "categories", "group", "segment", "type", "kism", "shreni"},
+    "order": {"order", "invoice", "bill", "voucher", "transaction", "transactions", "txn", "entry", "entries", "record", "records", "row", "rows"},
 }
 _SYN_OF = {stem(w): k for k, ws in ENTITY_SYNONYMS.items() for w in ws}
 
@@ -352,7 +358,9 @@ def only_known_words(question, columns, sheet_names=None):
                                            "make", "it", "change", "badlo", "badal", "instead", "same", "again", "dobara", "wapas", "details", "detail", "dikha", "list", "show", "give",
                                            "tell", "want", "need", "please", "ok", "okay", "haan", "nahi", "nhi", "ki", "ka", "ke", "wala", "vale", "hi", "to", "toh", "na",
                                            "add", "jodo", "jod", "include", "plus", "saath", "sath", "too", "also", "as", "well", "remove", "hatao", "hata", "without", "bina", "sirf",
-                                           "vs", "versus", "cross", "crosstab", "pivot", "matrix", "by")}
+                                           "vs", "versus", "cross", "crosstab", "pivot", "matrix", "by",
+                                           "sir", "ji", "esa", "aisa", "kuchh", "kuch", "chaiye", "chahiye", "moka", "mauka", "usak", "uska", "usme", "usmein", "mujhe", "fir", "phir",
+                                           "no", "number", "one", "compare", "comparison", "difference", "farak", "fark", "antar", "share", "percentage", "percent", "hissa", "contribution")}
         import calendar
         KNOWN_WORDS |= {stem(w) for w in ("month", "months", "mahina", "mahine", "maheena", "maheene", "monthly", "day", "days", "din", "daily", "week", "weeks", "hafta", "hafte", "weekly",
                                            "year", "years", "saal", "yearly", "annual", "date", "dates", "datewise", "today", "aaj", "yesterday", "kal", "last", "this", "current", "previous",
@@ -452,8 +460,14 @@ def resolve_measures(measures, columns, choices=None):
                     raise AmbiguousMeasure("Items count ke liye quantity columns ek se zyada hain — kaunsa lena hai?", [c["name"] for c in q], measure_key(m))
                 out.append({"column": q[0]["name"], "aggregation": "sum", "label": "Items Count" if len(measures) > 1 else q[0]["name"], "kind": "quantity"})
             elif dim is not None:
-                word = str(ent).title() if ent else dim["name"]
+                word = "Transaction" if ent == "order" else (str(ent).title() if ent else dim["name"])
                 out.append({"column": dim["name"], "aggregation": "count_distinct", "label": f"{word} Count", "kind": "count"})
+            elif ent == "order":
+                # "transaction count" with no invoice/voucher id column: the number of rows (counted on the most complete column)
+                col = next((c for c in cols if c["role"] == "date"), cols[0] if cols else None)
+                if col is None:
+                    raise AmbiguousMeasure("Is table mein koi column nahi hai.")
+                out.append({"column": col["name"], "aggregation": "count", "label": "Transaction Count", "kind": "count"})
             else:
                 raise AmbiguousMeasure(f"'{ent}' ke liye koi column nahi mila. Available: {[c['name'] for c in cols]}")
     deduped = []

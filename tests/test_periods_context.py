@@ -217,7 +217,7 @@ def test_period_explanation_when_asked(conv):
 def test_currency_format_consistent_between_cards_and_table():
     df = pd.DataFrame({"period": ["2026-08", "2026-09"], "Net Amount": [14858907.21, 12108412.28], "Customer Count": [3, 2]})
     shown = display_table(df)
-    assert list(shown["Net Amount"]) == ["₹1,48,58,907.21", "₹1,21,08,412.28"] and list(shown["Customer Count"]) == ["3", "2"] and list(shown["period"]) == ["2026-08", "2026-09"]
+    assert list(shown["Net Amount"]) == ["₹1,48,58,907.21", "₹1,21,08,412.28"] and list(shown["Customer Count"]) == ["3", "2"] and list(shown["period"]) == ["Aug-26", "Sep-26"]      # display only; the raw frame keeps ISO months
     assert shown["Net Amount"][0] == _fmt(14858907.21, "Net Amount") and list(df["Net Amount"]) == [14858907.21, 12108412.28]   # raw frame untouched
     assert _fmt(26967319.49, "AMOUNT") == "₹2,69,67,319.49" and _fmt(1500, "Qty") == "1,500"
 

@@ -55,6 +55,7 @@ class Reply:
     options: list = field(default_factory=list)    # clarification choices (rendered as chips / numbered list)
     drillable: str | None = None                   # column whose rows can be clicked for a drill-down ("period")
     files: list = field(default_factory=list)      # generated files [{"name","bytes","mime"}] (reports)
+    totals: dict | None = None                     # {"all": {col: v}, "displayed": {col: v}, "cut": bool, "label": "Grand Total"|"Displayed Top N Total", "rows", "groups"}
     pivot: bool = False                            # df is a cross-tab (rows × columns of one measure): table only, no chart
     long_df: pd.DataFrame | None = None            # the long (period/dimension/value) result behind a pivot, for exports/charts
 
@@ -498,6 +499,7 @@ def answer(conv, question, api_key, model, tools, log=None):
                 reply = Reply(grounded_answer(ai, question, plan, result, conv), df=None if single else df, chart=None if single else chart_hint(plan, df),
                               metric=result.get("metric") or plan.get("metric"), plan=plan, want_chart=bool(plan.get("want_chart")),
                               value=(float(df["value"].iloc[0]) if single and pd.api.types.is_number(df["value"].iloc[0]) and not isinstance(df["value"].iloc[0], bool) else None))
+                attach_totals(reply, plan, result)
                 apply_pivot(reply, plan, question)
                 attach_entity_images(reply, question)
             conv.last_plan = plan
@@ -701,8 +703,9 @@ def understood_reply(conv, question, tools, log):
     if intent["kind"] in ("analysis", "drill") and state and (intent["additive"] or intent["correction"] or intent["kind"] == "drill" or intent.get("period") or intent.get("grain") or intent.get("group_by") or intent.get("top_n") or metric_swap):
         grain = intent["grain"] or (((intent["period"] or {}).get("grain")) if not intent["group_by"] else None)     # "last 12 months" carries month grain
         new_state = {**state, "period": intent["period"] or {}, "grain": grain, "group_by": intent["group_by"], "metrics": intent["metrics"] or state.get("metrics") or [],
-                     "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period")}
-        log("route_state", kind=intent["kind"], metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"])
+                     "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period"),
+                     "rank_scope": intent.get("rank_scope"), "share": intent.get("share")}
+        log("route_state", kind=intent["kind"], metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"], rank_scope=new_state["rank_scope"], confidence=intent.get("confidence"))
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
     from semantics import value_words
     if intent["kind"] == "analysis" and not state and intent["metrics"] and value_words(question, cols):
@@ -728,8 +731,9 @@ def understood_reply(conv, question, tools, log):
             return None
         new_state = {"source_id": sid, "sheet_name": sheet, "date_column": date_col if isinstance(date_col, str) else None, "period": intent["period"] or {},
                      "grain": intent["grain"] or ((intent["period"] or {}).get("grain") if not intent["group_by"] else None), "group_by": intent["group_by"],
-                     "metrics": intent["metrics"], "filters": [], "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period")}
-        log("route_state", kind="fresh", metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"])
+                     "metrics": intent["metrics"], "filters": [], "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period"),
+                     "rank_scope": intent.get("rank_scope"), "share": intent.get("share")}
+        log("route_state", kind="fresh", metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"], rank_scope=new_state["rank_scope"], confidence=intent.get("confidence"))
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
     return None
 
@@ -772,7 +776,9 @@ def _likely_table(conv, question):
         tables = schema.get("sheets") or [{"name": None, "columns": schema.get("columns", [])}]
         t = next((t for t in tables if t.get("name") == name), None)
         return ((sid, name, t) if t else None), []
+    from semantics import _SYN_OF
     qt = {stem(t) for t in content_tokens(question)}
+    q_ents = {_SYN_OF[t] for t in qt if t in _SYN_OF}                       # "seller" → employee, "party" → customer
     ranked = []
     for sid, schema in conv.schemas.items():
         if schema.get("kind") not in (None, "table", "workbook"):
@@ -782,6 +788,7 @@ def _likely_table(conv, question):
         for t in tables:
             label = t.get("name") or str(schema.get("name") or sid)
             tab_sc = 2 * len(qt & stems(label)) + sum(len(qt & stems(c["name"])) for c in t.get("columns", []))
+            tab_sc += sum(1 for c in t.get("columns", []) if c.get("role") == "dimension" and {_SYN_OF.get(x) for x in stems(c["name"])} & q_ents)   # entity words name a column
             ranked.append((tab_sc + src_bonus, sid, t.get("name"), label, t, tab_sc))
     ranked.sort(key=lambda x: -x[0])
     if not ranked:
@@ -791,7 +798,10 @@ def _likely_table(conv, question):
         return (sid, name, t), []
     best, best_sid, best_tab = ranked[0][0], ranked[0][1], ranked[0][5]
     # tabs of the same source compete on their own words only (the shared source name cannot break their tie)
-    close = [(sid, label, t) for sc, sid, name, label, t, tab in ranked[:4] if sc > 0 and ((sid != best_sid and sc * 2 >= best) or (sid == best_sid and tab > 0 and tab * 2 >= best_tab))]
+    # A table that matches strictly fewer of the question's words (1 vs 2: "Delhi ke top 2 party by amount" → INVENTORY has
+    # only "amount", SALES has "amount" + the party column) is not a rival; equal scores are.
+    close = [(sid, label, t) for sc, sid, name, label, t, tab in ranked[:4] if sc > 0 and ((sid != best_sid and (sc == best or (sc >= 2 and sc * 2 >= best)))
+                                                                                        or (sid == best_sid and tab > 0 and (tab == best_tab or (tab >= 2 and tab * 2 >= best_tab))))]
     if best_tab == 0 and ranked[0][0] > 0 and len([x for x in ranked if x[1] == best_sid]) > 1:
         close = [(sid, label, t) for sc, sid, name, label, t, tab in ranked[:4] if sid == best_sid]                     # only the source matched: its tabs tie
     if len(close) > 1:
@@ -899,6 +909,20 @@ def _pick_option(text, candidates):
             return hits[0]
     hits = [c for c in candidates if c.lower().replace("_", " ") in t.replace("_", " ")]
     return hits[0] if len(hits) == 1 else None
+
+
+def attach_totals(reply, plan, result):
+    """Grouped planner results: all-data total (grand_total_all_groups, computed before any top-N cut) vs the sum of the shown rows."""
+    df = reply.df
+    if df is None or df.empty or "value" not in df.columns or (plan or {}).get("operation") != "aggregate" or (plan.get("aggregation") or "sum") not in ("sum", "count"):
+        return reply
+    shown = float(pd.to_numeric(df["value"], errors="coerce").sum())
+    grand = result.get("grand_total_all_groups")
+    cut = bool(result.get("groups_total") and result["groups_total"] > len(df))
+    label = reply.metric or plan.get("metric") or "value"
+    reply.totals = {"all": {label: float(grand) if grand is not None else shown}, "displayed": {label: shown}, "cut": cut, "rows": int(len(df)),
+                    "groups": int(result.get("groups_total") or len(df)), "label": (f"Displayed Top {plan['top_n']} Total" if cut and plan.get("top_n") else ("Displayed Total" if cut else "Grand Total"))}
+    return reply
 
 
 def apply_pivot(reply, plan, question=""):

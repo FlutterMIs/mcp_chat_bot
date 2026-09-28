@@ -43,6 +43,11 @@ def _cell(v, money):
     return re.sub(r"^(\d{4}-\d{2}-\d{2})[T ]00:00:00(\.0+)?$", r"\1", s)
 
 
+def _period_label(v):
+    from response import period_label
+    return period_label(v)
+
+
 def fmt_value(v, money):
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return str(v)
@@ -81,7 +86,7 @@ def result_list(df, metric, limit=LIST_LIMIT):
         rows = df.rename(columns={"value": metric}).head(limit).to_dict(orient="records") if metric and metric not in df.columns else rows
         for i, r in enumerate(rows, 1):
             r = {("value" if k == metric else k): v for k, v in r.items()}
-            label = " · ".join(str(v) for k, v in r.items() if k != "value" and v is not None)
+            label = " · ".join(str(_period_label(v) if k == "period" else v) for k, v in r.items() if k != "value" and v is not None)
             lines.append(f"{i}. {label} — {fmt_value(r['value'], money)}" if label else fmt_value(r["value"], money))
     else:
         cols = detail_columns(df)
@@ -161,6 +166,10 @@ def compose(reply, heard=None):
     body = head + text + (f"\n\n{listing}" if listing else "")
     if more:
         body += f"\n…aur {more} rows."
+    totals = getattr(reply, "totals", None)
+    if has_rows and totals and totals.get("displayed"):
+        vals = totals["all"] if not totals.get("cut") else totals["displayed"]
+        body += f"\n*{totals.get('label') or 'Grand Total'}:* " + " · ".join(f"{k} {fmt_value(v, is_money(k) or (k == 'value' and is_money(reply.metric)))}" for k, v in vals.items())
     trace = f"_🔎 {' → '.join(t.split('(')[0] for t in reply.trace[:6])}_" if getattr(reply, "trace", None) else ""
     tail = [t for t in (trace or context_footer(reply.plan), suggestions(reply.plan, len(reply.df) if has_rows else 0)) if t]
     if tail:

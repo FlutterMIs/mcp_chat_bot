@@ -1,6 +1,6 @@
-# PROJECT_STATE.md — MCP Universal Business Analyst (V8)
+# PROJECT_STATE.md — MCP Universal Business Analyst (V9)
 
-Last updated: 2026-09-28. Architecture and every module's role are in `README.md` (this file lists what is not obvious there).
+Last updated: 2026-09-28 (V9 analytics engine). Architecture and every module's role are in `README.md` (this file lists what is not obvious there).
 
 ## 1. What it is
 Streamlit web app + WhatsApp bot sharing one brain (`analyst.answer`). OpenRouter LLM reads language; MCP-style read-only
@@ -61,11 +61,20 @@ point `memory.MEMORY_FILE` elsewhere — never leave test mappings in it.
 - Real sheet offline check (2026-09-28): "sales ka total" = scalar SALES/AMOUNT; "sales amount category wise" = CATEGORY × SUM(AMOUNT) (40 rows); "inventory closing stock" = INVENTORY/CLOSING STOCK; "September ki sales" switches back to SALES and asks TIMESTAMP vs VOUCHER DATE once.
 - Not done: RAG UI toggle (env only), stacked charts for pivots (table only), agent-side citations are the passages it retrieved (not per-sentence).
 
+## 6c. V9 (2026-09-28) — natural-language analytics engine
+- `understanding.understand` now returns `rank_scope` (None = global top-N | "period" = top-N per month/day/year | a column = top-N per state/category), `compare`, `share`, `confidence` (HIGH/MEDIUM/LOW, logged in `route_state`). Helpers: `ranked_entity` ("top seller" → the SALES PERSON-like column via `ENTITY_SYNONYMS`, no clarification), `rank_axes` ("har state ke top 3 customer" → scope STATE, ranked CUSTOMER), `comparison_periods` ("this month vs last month", "pichhle month se difference"), `_singular_entity_after_top` ("top seller" = 1, "top customers" = 10).
+- `analysis.execute_state`: per-group ranking = sort within scope + `groupby(scope).head(n)` (never sort-all + head); ranking metric = the money measure when several ("rank by AMOUNT, show AMOUNT + QTY"); `totals` block = all-data total vs displayed total (`cut`, label "Grand Total" / "Displayed Top N Total"); `Share %` column; two-period comparison adds Change card + "% change" line computed in code.
+- Presentation: `response.display_table(df, totals)` → Sep-26 month labels (raw frame stays ISO), Total row; `response.chart_check` drops untruthful charts (text Y, numeric X, missing colour); charts may carry `color` (month on X, amount on Y, winner as colour) — `chart_ui` supports it; UI shows "Total Records", clickable real URL columns; WhatsApp prints the totals line.
+- `result_check`: top-N per scope ≤ N rows per scope value; displayed total must equal the table; grand total must equal displayed when nothing was cut.
+- Vocabulary (`semantics.py`): seller/saler/salesman → employee entity; state/category entities; "items sold" (`SOLD_CUES`) = quantity; "transaction count" = distinct invoice/voucher id, else row count (`Transaction Count`).
+- Real sheet offline: the golden question ("… date mont wise … top saler usak sale amount … total items sale count") → asks TIMESTAMP vs VOUCHER DATE once → Apr–Sep top seller per month with Sales Amount + Items Count, no ₹ on items.
+- Tests: `tests/test_v9_analytics.py` (spec items 1-25 + sequences A/B/C + result-check rules).
+
 ## 7. Testing pattern
 - Offline, no LLM: `monkeypatch.setattr(analyst, "OpenRouterAI", NoLLM)` (planner/wording raise if called), fixed
   reference date via `monkeypatch.setattr("understanding.date", date)` **and** `monkeypatch.setattr("periods.date", date)`.
 - Planner-path tests use a fake planner class returning a fixed plan (`tests/test_multi_metric.py::planner`).
-- Run: `.venv/bin/python -m pytest tests -q -p no:cacheprovider -W ignore` (282 pass, 16 live tests skipped).
+- Run: `.venv/bin/python -m pytest tests -q -p no:cacheprovider -W ignore` (304 pass, 16 live tests skipped).
 - Backend tests: `platform` fixture in `tests/test_backend.py` (in-memory DB via `db.configure("sqlite://")`, `DATA_DIR` in tmp, `APP_SECRET_KEY` set). UI: `APP_AUTH_MODE=none` for `AppTest`.
 - Real sheet offline check: register the sheet with `MCPServer().register_google_sheet` and run the conversation with NoLLM
   (see `tests/test_periods_context.py::test_acceptance_conversation` for the exact turns).

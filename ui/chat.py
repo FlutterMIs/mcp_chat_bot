@@ -80,19 +80,23 @@ def render_assistant(m):
         open_table = shape in ("ranking", "detail", "breakdown") or not chart
         with st.expander(f"Table · {len(shown):,} rows" if len(shown) > 1 else "Table", expanded=open_table):
             drill = fr.get("drilldown") or m.get("drillable")
-            pretty = display_table(shown)
+            totals = fr.get("totals")
+            pretty = display_table(shown, totals)
+            links = {c: st.column_config.LinkColumn(str(c), display_text="🔗 open") for c in shown.columns
+                     if shown[c].dropna().astype(str).str.match(r"^https?://", case=False).mean() >= 0.8 and shown[c].notna().any()}   # real URLs only
             if drill and drill in shown.columns:
                 st.caption("Row par click karo — us period ka detail khulega.")
-                ev = st.dataframe(pretty, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key=f"tbl_{m['id']}")
+                ev = st.dataframe(pretty, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key=f"tbl_{m['id']}", column_config=links or None)
                 sel = ev.selection.rows if ev and getattr(ev, "selection", None) else []
-                if sel and st.session_state.get(f"drilled_{m['id']}") != sel[0]:
+                if sel and sel[0] < len(shown) and st.session_state.get(f"drilled_{m['id']}") != sel[0]:
                     st.session_state[f"drilled_{m['id']}"] = sel[0]
                     st.session_state.pending_q = f"{shown.iloc[sel[0]][drill]} details"
                     st.rerun()
             else:
-                st.dataframe(pretty, width="stretch", hide_index=True)
-            if fr.get("table_note") or m.get("table_note"):
-                st.caption(fr.get("table_note") or m.get("table_note"))
+                st.dataframe(pretty, width="stretch", hide_index=True, column_config=links or None)
+            note = fr.get("table_note") or m.get("table_note")
+            recs = f"Total Records: {len(shown):,}" + (f" (of {totals['groups']:,} groups)" if totals and totals.get("cut") and totals.get("groups") else "")
+            st.caption((note + " · " if note else "") + recs)
         with st.container(horizontal=True):
             from exports import MIME, ResultExport
             ex = ResultExport(title=str(metric or fr.get("source_info", {}).get("metric") or "Result"), question=m.get("question", ""), table=df, value=fr.get("value"),
@@ -136,6 +140,7 @@ def _seed_chart(df, msg_id, chart, metric):
     if best:
         st.session_state.setdefault(f"chart_x_{msg_id}", best["x"])
         st.session_state.setdefault(f"chart_y_{msg_id}", best["y"])
+        st.session_state.setdefault(f"chart_color_{msg_id}", best.get("color"))
 
 
 def render_user(m):
@@ -189,7 +194,7 @@ def answer_question(user, workspace_id, q, audio=None):
     m = {"id": uuid.uuid4().hex[:12], "role": "assistant", "content": fr.answer, "question": q, "df": fr.table, "files": fr.files,
          "final_response": {"shape": fr.shape, "kind": fr.kind, "metrics": fr.metrics, "chart": fr.chart, "table_note": fr.table_note, "drilldown": fr.drilldown,
                             "options": fr.options, "source_info": fr.source_info, "period": fr.period, "value": fr.value, "date_range": fr.date_range,
-                            "images": fr.images, "videos": fr.videos, "metric": r.metric},
+                            "images": fr.images, "videos": fr.videos, "metric": r.metric, "totals": fr.totals},
          "debug": fr.debug or None}
     st.session_state.messages.append(m)
     st.session_state.autoplay_id = m["id"]

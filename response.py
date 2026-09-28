@@ -38,6 +38,7 @@ class FinalResponse:
     images: list = field(default_factory=list)
     videos: list = field(default_factory=list)
     debug: dict = field(default_factory=dict)  # {"trace", "plan", "tool_calls"} — never rendered unless debug mode
+    totals: dict | None = None                 # {"all", "displayed", "cut", "label", "rows", "groups"} — Grand Total vs Displayed Top-N Total
     value: float | None = None                 # the one number of a scalar answer (raw, unformatted)
     date_range: str | None = None              # "2026-08-01 → 2026-09-27" — the resolved period the result covers
     period: dict | None = None                 # canonical period metadata (expression, reference date, periods)
@@ -160,6 +161,8 @@ def finalize(reply, question="", chart_asked=False, debug=False):
                        drilldown=reply.drillable if shape in ("series", "ranking", "breakdown") else None,
                        options=list(reply.options or []), files=list(reply.files or []), images=list(reply.images or []), videos=list(reply.videos or []))
     fr.value = reply.value if shape == "scalar" else None
+    fr.totals = getattr(reply, "totals", None) if table is not None else None
+    fr.chart = chart_check(table if table is not None else reply.df, fr.chart)
     fr.date_range = fr.source_info.get("date_range")
     fr.period = (reply.plan or {}).get("period")
     if debug:
@@ -167,14 +170,57 @@ def finalize(reply, question="", chart_asked=False, debug=False):
     return fr
 
 
-def display_table(df):
-    """The table as people read it: Indian grouping, ₹ on money columns, whole counts. The raw frame stays for
-    charts and downloads, so no value is altered — only its text."""
+def chart_check(df, chart):
+    """A chart is shown only when it is truthful: X exists, Y is a numeric measure (not a label, not a bool), X ≠ Y,
+    a categorical column is never plotted as a number, and a period axis stays in its sortable ISO form."""
+    if not chart or df is None or df.empty:
+        return None
+    x, y = chart.get("x"), chart.get("y")
+    if not x or not y or x == y or x not in df.columns or y not in df.columns:
+        return None
+    ys = pd.to_numeric(df[y], errors="coerce")
+    if pd.api.types.is_bool_dtype(df[y]) or ys.notna().mean() < 0.8 or str(y).lower() in ("id", "sr", "sno", "index"):
+        return None
+    if pd.api.types.is_numeric_dtype(df[x]) and x != "period" and df[x].nunique() > 12:
+        return None                                        # a numeric id/amount is not a category axis
+    color = chart.get("color")
+    if color and (color not in df.columns or color == y or df[color].nunique() > 40):
+        chart = {k: v for k, v in chart.items() if k != "color"}
+    return chart
+
+
+def period_label(v):
+    """2026-09 → Sep-26 for display only; days and years stay as they are. The underlying value is untouched."""
+    import re
+    m = re.match(r"^(\d{4})-(\d{2})$", str(v or ""))
+    if not m:
+        return v
+    import calendar
+    return f"{calendar.month_abbr[int(m.group(2))]}-{m.group(1)[2:]}"
+
+
+def display_table(df, totals=None):
+    """The table as people read it: Indian grouping, ₹ on money columns, whole counts, Sep-26 month labels, and a
+    Total row when a totals block exists (labelled "Grand Total" or "Displayed Top N Total" — never confused).
+    The raw frame stays for charts and downloads, so no value is altered — only its text."""
     if df is None or df.empty:
         return df
     from analyst import _fmt
     out = df.copy()
+    money_free = ("share %",)
     for c in out.columns:
-        if pd.api.types.is_numeric_dtype(out[c]) and not pd.api.types.is_bool_dtype(out[c]) and c != "period":
-            out[c] = out[c].map(lambda v: "" if pd.isna(v) else _fmt(float(v), str(c)))
+        if c == "period":
+            out[c] = out[c].map(period_label)
+        elif pd.api.types.is_numeric_dtype(out[c]) and not pd.api.types.is_bool_dtype(out[c]):
+            out[c] = out[c].map(lambda v, c=c: "" if pd.isna(v) else (f"{float(v):.2f}%" if str(c).lower() in money_free else _fmt(float(v), str(c))))
+    if totals and totals.get("displayed"):
+        vals = totals["all"] if not totals.get("cut") else totals["displayed"]
+        row = {c: "" for c in out.columns}
+        row[out.columns[0]] = totals.get("label") or "Grand Total"
+        for c, v in vals.items():
+            if c in out.columns:
+                row[c] = _fmt(float(v), str(c))
+            elif c == "value" and len(out.columns) > 1:
+                row[out.columns[-1]] = _fmt(float(v), str(out.columns[-1]))
+        out = pd.concat([out, pd.DataFrame([row])], ignore_index=True)
     return out

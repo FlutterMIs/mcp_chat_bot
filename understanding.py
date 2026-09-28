@@ -148,16 +148,74 @@ def cross_tab(question, columns):
     return [], None
 
 
+NO1 = re.compile(r"\b(no\.?\s*1|number\s*(?:one|1)|#\s*1|numero\s*uno|first|pehla|pehle number)\b", re.I)
+SCOPE_WORDS = {"har", "per", "each", "every", "wise", "hisaab", "hisab", "anusar", "vaar", "war", "by", "ke", "ka", "ki", "me", "mein"}
+COMPARE_CUE = re.compile(r"\b(vs\.?|versus|compare|comparison|compar\w*|difference|differnce|farak|fark|antar|mukabl\w*|muqabl\w*|tulna|growth|badh\w*|ghat\w*|change)\b", re.I)
+SHARE_CUE = re.compile(r"\b(share|percentage|percent|pct|contribution|hissa|kitna percent|%)", re.I)
+PREV_CUE = re.compile(r"\b(pichh?l[ae]|previous|last|pehle wale|pehle ke|gaye)\s+(month|mahin\w*|maheen\w*|year|saal|week|hafte)\b", re.I)
+
+
+def ranked_entity(question, columns, measures=()):
+    """The dimension a ranking is about when the user names an entity without a grouping word: "top seller" → the
+    SALES PERSON-like column, "sabse kam sale wale 5 customer" → the customer-like column. Schema decides; nothing is invented."""
+    from semantics import dimension_for_entity
+    toks = [stem(t) for t in tokens(question)]
+    counted = {m.get("entity") for m in measures if m.get("kind") == "count"}
+    for i, t in enumerate(toks):
+        ent = _SYN_OF.get(t)
+        if not ent or ent in counted:
+            continue
+        if any(x in COUNT_CUES for x in toks[max(0, i - 2):i + 3]) and not any(x in POSTFIX_GROUP for x in toks[i + 1:i + 3]):
+            continue                                                    # "customer count" is a measure, not an axis
+        d = dimension_for_entity(ent, columns)
+        if d is not None:
+            return d["name"]
+    return None
+
+
+def rank_axes(question, columns, dims, top_word_pos):
+    """Two named dimensions + a ranking ("har state ke top 5 customer", "state wise top customer"):
+    (scope_dim, ranked_dim). The ranked dimension is the one nearest AFTER the top word; the other is the scope."""
+    toks = [stem(t) for t in tokens(question)]
+    def pos(d):
+        dt = {stem(t) for t in tokens(d)} - {"name", "no", "id", "code"}
+        hits = [i for i, t in enumerate(toks) if t in dt or (_SYN_OF.get(t) and any(_SYN_OF.get(t) == _SYN_OF.get(x) for x in dt))]
+        return hits
+    after = [(min(h for h in pos(d) if h > top_word_pos), d) for d in dims if any(h > top_word_pos for h in pos(d))]
+    if after:
+        ranked = sorted(after)[0][1]
+    else:
+        ranked = dims[-1]
+    scope = next((d for d in dims if d != ranked), None)
+    return scope, ranked
+
+
+def _singular_entity_after_top(question):
+    """"top seller" / "top customer" mean ONE; "top customers" / "top 5 …" mean a list."""
+    raw = tokens(question)
+    for i, t in enumerate(raw):
+        if t in ("top", "bottom", "best", "worst", "highest", "lowest") and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            if nxt.isdigit():
+                return False
+            if stem(nxt) in _SYN_OF or stem(nxt) in ITEM_LIKE:
+                return not (nxt.endswith("s") and stem(nxt) != nxt)
+    return False
+
+
 def understand(question, columns, state=None, today=None):
     """Structured intent for one message, merged with the previous analysis state for follow-ups.
 
     Returns {"kind": "analysis"|"report"|"drill"|None, "period", "grain", "group_by", "metrics", "top_n", "sort",
-             "additive", "correction", "detail"} — resolved later against the schema by the executor."""
+             "rank_scope", "additive", "correction", "detail", "compare", "share", "confidence"} — resolved later against
+    the schema by the executor. rank_scope: None (global top-N) | "period" (top-N per month/day/year) | a column name
+    (top-N per state/category…)."""
     state = state or {}
     q = str(question or "")
     measures = requested_measures(q, columns)
-    if not measures and state and FOLLOW_ADD.search(q):
+    if not measures and state and FOLLOW_ADD.search(q) and not FOLLOW_TOP.search(q) and not NO1.search(q):
         # "items bhi" / "customer bhi add karo": a bare entity word in an additive follow-up is a metric request
+        # ("top seller bhi bata" is a ranking axis instead — handled below)
         ent = next((entity_of(t) for t in tokens(q) if stem(t) in _SYN_OF or stem(t) in ITEM_LIKE), None)
         if ent:
             measures = [{"kind": "count", "entity": ent, "column_hint": None}]
@@ -171,78 +229,187 @@ def understand(question, columns, state=None, today=None):
     tops = list(FOLLOW_TOP.finditer(q))
     loose = re.search(r"(?<![\d-])(\d{1,3})(?![\d-])", q) if tops and not any(t.group(2) for t in tops) and not parse_period(q, today) else None
     top = next((t for t in tops if t.group(2)), None) or next((t for t in tops if re.match(r"(top|bottom)", t.group(0), re.I)), None) or (tops[0] if loose else None)
-    top_n = int(top.group(2)) if top and top.group(2) else (int(loose.group(1)) if loose else (10 if top else None))
+    no1 = bool(NO1.search(q)) and not tops
+    top_n = int(top.group(2)) if top and top.group(2) else (int(loose.group(1)) if loose else ((1 if _singular_entity_after_top(q) else 10) if top else (1 if no1 else None)))
+    if no1 and not top:
+        top = True
     low = bool(LOW_WORDS.search(q))
+    confidence = "HIGH"
+    if top and (not dim or (not isinstance(dim, list) and ({stem(t) for t in tokens(dim)} & ITEM_LIKE) and any(m.get("entity") in ITEM_LIKE | {"item"} or m.get("kind") == "quantity" for m in measures))):
+        # "top seller", "sabse kam sale wale 5 customer": the entity word names the axis — no clarification needed.
+        # ("month wise top seller … total items sold": "items" is the measure, the seller is the axis)
+        ent_dim = ranked_entity(q, columns, measures)
+        if ent_dim:
+            dim, confidence = ent_dim, "MEDIUM"
     if not top_n and dim and SUPERLATIVE_ONLY.search(q) and (low or HIGH_WORDS.search(q)):
         top_n, top = 1, True                                                # "sabse kam sale wala customer" = that one customer
+    if top_n and dim and not measures and not (state and FOLLOW_ADD.search(q)):
+        # "top seller" / "top 5 customer": ranked by the money column when the schema has one (the executor asks if several)
+        measures = [{"kind": "monetary", "entity": None, "column_hint": None, "implicit": True}]
+        confidence = "MEDIUM" if confidence == "HIGH" else confidence
+    # Ranking scope: "har month ke top 3 seller" / "month wise top seller" → per period; "har state ke top 5 customer" → per state.
+    rank_scope = None
+    if top_n and isinstance(dim, list) and len(dim) == 2:
+        top_pos = next((i for i, t in enumerate(tokens(q)) if t in ("top", "bottom", "best", "worst", "highest", "lowest", "sabse")), 0)
+        scope, ranked = rank_axes(q, columns, dim, top_pos)
+        dim, rank_scope = [scope, ranked], scope
+    elif top_n and dim and not isinstance(dim, list):
+        full, _ = dimension_matches(q, columns)
+        item_measure = any(m.get("entity") in ITEM_LIKE | {"item"} or m.get("kind") == "quantity" for m in measures)
+        others = [d for d in full if d != dim and not (item_measure and ({stem(t) for t in tokens(d)} & ITEM_LIKE))]   # "items sold" is a measure, not an axis
+        if others and re.search(r"\b(har|per|each|every)\b", q, re.I) or (others and re.search(r"\bwise\b", q, re.I)):
+            top_pos = next((i for i, t in enumerate(tokens(q)) if t in ("top", "bottom", "best", "worst", "highest", "lowest", "sabse")), 0)
+            scope, ranked = rank_axes(q, columns, [others[0], dim], top_pos)
+            dim, rank_scope = [scope, ranked], scope
+    if top_n and grain and dim and not rank_scope:
+        rank_scope = "period"
     agg = question_intent(q)["aggregation"]
     if agg in ("avg", "max", "min") and not top_n:
         measures = [dict(m, aggregation=agg) for m in measures]     # "average marks", "highest amount" (a single MAX, not a ranking)
     if re.search(r"\b(distinct|different|unique|alag|alag-alag|types?|kinds?|variety|prakar|kitne tarah)\b", q, re.I):
         measures = [dict(m, distinct=True) if m["kind"] == "count" else m for m in measures]
     additive = bool(FOLLOW_ADD.search(q)) and bool(state)
-    correction = bool(re.search(r"\b(nahi|nhi|no|not|galat|wrong|instead|ki jagah|nahi chahiye)\b", q, re.I)) and bool(state)
+    correction = bool(re.search(r"\b(nahi|nhi|no|not|galat|wrong|instead|ki jagah|nahi chahiye)\b", q, re.I)) and bool(state) and not no1
     short = len(tokens(q)) <= 6
     # "last 2 months ki sale kitni hui?" is one total, not a month-wise table: the period's default breakdown is dropped
     # for a single-measure total question without any breakdown word. "last 12 months sales dikhao" stays a series.
     explain = bool(DATE_ASK.search(q))
     if period and period.get("grain") and not grain and not dim and len(measures) <= 1 and (SCALAR_ASK.search(q) or explain) and not BREAKDOWN_ASK.search(q) and not top_n:
         period = dict(period, grain=None)
+    # Comparison of two periods: "this month vs last month", "pichhle month se kitna difference hai", "2025 vs 2026"
+    compare = bool(COMPARE_CUE.search(q)) and not grain
+    if compare:
+        asks = comparison_periods(q, state, today)
+        if asks:
+            period = {"label": " vs ".join(a["label"] for a in asks), "from": min(a["from"] for a in asks), "to": max(a["to"] for a in asks),
+                      "grain": None, "period_type": "comparison", "asks": asks, "compare": True,
+                      "periods": [{"label": a["label"], "start": a["from"], "end": a["to"]} for a in asks]}
+        else:
+            compare = False
+    share = bool(SHARE_CUE.search(q)) and bool(dim)
+    if share and not measures and not state:
+        measures = [{"kind": "monetary", "entity": None, "column_hint": None, "implicit": True}]      # "category wise share" = share of the money column
     # SERIES → TOTAL follow-up: no new period/grain/dimension/top-N, just "total kar ke batao" / "only total".
-    same_metric = not measures or [{k: v for k, v in m.items() if k != "column_hint"} for m in measures] == [{k: v for k, v in m.items() if k not in ("column_hint", "aggregation")} for m in (state.get("metrics") or [])]
+    same_metric = not measures or [{k: v for k, v in m.items() if k not in ("column_hint", "implicit")} for m in measures] == [{k: v for k, v in m.items() if k not in ("column_hint", "aggregation", "implicit")} for m in (state.get("metrics") or [])]
     collapse = bool(state) and not additive and bool(COLLAPSE.search(q)) and not grain and not dim and not period and not top_n and same_metric
     concise = collapse and bool(ONLY.search(q))
     intent = {"question": q, "metrics": measures, "new_metrics": list(measures), "period": period, "grain": grain, "group_by": (list(dim) if isinstance(dim, list) else [dim]) if dim else [], "top_n": top_n,
-              "sort": ("asc" if low else "desc") if top else None, "direction_said": bool(low or HIGH_WORDS.search(q)),
+              "sort": ("asc" if low else "desc") if top else None, "direction_said": bool(low or HIGH_WORDS.search(q)), "rank_scope": rank_scope,
               "additive": additive, "correction": correction, "report": bool(REPORT_Q.search(q)) and not measures,
               "detail": bool(DRILL_Q.search(q) or SHOW_ITEMS.search(q)), "kind": None,
-              "collapse": collapse, "concise": concise, "explain_period": explain}
+              "collapse": collapse, "concise": concise, "explain_period": explain, "compare": compare, "share": share, "confidence": confidence}
     if intent["report"] and state:
         intent["kind"] = "report"
         return intent
     # Follow-up merge: keep the previous source/period/grain/metrics unless the message changes them.
     if state and (additive or correction or short or collapse or (top_n and not dim and not period) or not (measures or period or grain or dim)):
-        merged = {k: state.get(k) for k in ("source_id", "sheet_name", "date_column", "period", "grain", "group_by", "metrics", "filters", "top_n", "sort")}
+        merged = {k: state.get(k) for k in ("source_id", "sheet_name", "date_column", "period", "grain", "group_by", "metrics", "filters", "top_n", "sort", "rank_scope")}
         if collapse:
             # keep source, period, filters and metrics; change only the operation: one total, no split, no ranking
-            merged["grain"], merged["group_by"], merged["top_n"], merged["sort"] = None, [], None, None
+            merged["grain"], merged["group_by"], merged["top_n"], merged["sort"], merged["rank_scope"] = None, [], None, None, None
             if merged.get("period"):
                 merged["period"] = dict(merged["period"], grain=None)
         if period:
             merged["period"] = period
             if period.get("grain"):
                 merged["grain"] = grain or period["grain"]                # "last 12 months" carries its own breakdown
-            elif not grain and not dim and (short or intent["detail"]):
+            elif not grain and not dim and (short or intent["detail"]) and not period.get("compare"):
                 merged["grain"] = None                     # "August" → drill into that month, no monthly split
                 intent["kind"] = "drill"
+            elif period.get("compare"):
+                merged["grain"], merged["group_by"], merged["top_n"], merged["rank_scope"] = None, [], None, None
         if grain:
             merged["grain"] = grain
         if dim:
             merged["group_by"] = list(dim) if isinstance(dim, list) else [dim]
             if not top_n:
-                merged["top_n"], merged["sort"] = None, None       # "customer wise" after "top 5 …" means all customers
+                merged["top_n"], merged["sort"], merged["rank_scope"] = None, None, None       # "customer wise" after "top 5 …" means all customers
             if not grain and not period:
-                merged["grain"] = None if intent["detail"] or short else merged.get("grain")
+                fresh_axes = bool(rank_scope and rank_scope != "period")            # "state wise top customer" is a new two-axis question
+                merged["grain"] = None if intent["detail"] or (short and not additive and not top_n) or fresh_axes else merged.get("grain")
         if measures:
+            new_ms = [m for m in measures if not m.get("implicit")] or measures
             if additive:
-                merged["metrics"] = list(state.get("metrics") or []) + [m for m in measures if m not in (state.get("metrics") or [])]
+                have = [{k: v for k, v in m.items() if k not in ("column_hint", "implicit")} for m in (state.get("metrics") or [])]
+                merged["metrics"] = list(state.get("metrics") or []) + [m for m in new_ms if {k: v for k, v in m.items() if k not in ("column_hint", "implicit")} not in have]
             elif correction:
-                merged["metrics"] = measures                # "nahi, total items chahiye" replaces the metric reading
+                merged["metrics"] = new_ms                # "nahi, total items chahiye" replaces the metric reading
+            elif any(m.get("implicit") for m in measures) and state.get("metrics"):
+                merged["metrics"] = list(state.get("metrics"))   # "top seller bhi" on an existing analysis keeps its metrics
             else:
-                merged["metrics"] = measures
+                merged["metrics"] = new_ms
         if top_n:
             merged["top_n"] = top_n
             merged["sort"] = intent["sort"] if intent["direction_said"] else (state.get("sort") or intent["sort"] or "desc")   # "top 5 only" keeps "kam"
             if not merged.get("group_by") and not dim:
                 merged["group_by"] = state.get("group_by") or []
+            merged["rank_scope"] = rank_scope or ("period" if merged.get("grain") and len(merged.get("group_by") or []) == 1 else
+                                                  (merged["group_by"][0] if len(merged.get("group_by") or []) == 2 else None))
+        elif merged.get("top_n") and merged.get("rank_scope") is None and merged.get("grain") and len(merged.get("group_by") or []) == 1:
+            merged["rank_scope"] = "period"
         intent.update({k: v for k, v in merged.items() if k in intent or k in ("source_id", "sheet_name", "date_column", "filters")})
         intent["metrics"], intent["period"], intent["grain"], intent["group_by"] = merged["metrics"] or [], merged["period"], merged["grain"], merged["group_by"] or []
-        intent["top_n"], intent["sort"] = merged.get("top_n"), merged.get("sort")
+        intent["top_n"], intent["sort"], intent["rank_scope"] = merged.get("top_n"), merged.get("sort"), merged.get("rank_scope")
         intent["kind"] = intent["kind"] or "analysis"
         return intent
     if measures or grain or dim or period:
         intent["kind"] = "analysis"
     return intent
+
+
+def comparison_periods(question, state=None, today=None):
+    """Two periods to compare, as asks [{"label","from","to"}], or None.
+    "this month vs last month" / "2025 vs 2026" → both named; "pichhle month se kitna difference" → the current analysis
+    period (or this month) vs the period before it. All bounds come from the one date resolver."""
+    from datetime import date as _date, timedelta
+    import calendar
+    today = today or _date.today()
+    q = str(question or "")
+    parts = [p for p in re.split(r"\bvs\.?\b|\bversus\b|\bcompare\w*\b|\baur\b|\band\b|\bse\b|,", q, flags=re.I) if p.strip()]
+    found = []
+    for part in parts:
+        p = resolve_date_expression(part, today)
+        if p and (p["from"], p["to"]) not in [(f["from"], f["to"]) for f in found]:
+            found.append({"label": p.get("label") or f"{p['from']} → {p['to']}", "from": p["from"], "to": p["to"]})
+    whole = resolve_date_expression(q, today)
+    if whole and whole.get("asks") and len(whole["asks"]) >= 2:
+        return whole["asks"][:2]
+    if len(found) >= 2:
+        return found[:2]
+    if not PREV_CUE.search(q) and not found:
+        return None
+    # one period (or none): compare the current period with the one before it
+    cur = None
+    if found:
+        cur = found[0]
+    elif state and (state.get("period") or {}).get("from") and (state.get("period") or {}).get("to"):
+        sp = state["period"]
+        cur = {"label": sp.get("label") or f"{sp['from']} → {sp['to']}", "from": sp["from"], "to": sp["to"]}
+    unit = "year" if re.search(r"\b(year|saal)\b", q, re.I) else "month"
+    if cur is None:
+        if unit == "year":
+            cur = {"label": "this year", "from": _date(today.year, 1, 1).isoformat(), "to": today.isoformat()}
+        else:
+            cur = {"label": "this month", "from": _date(today.year, today.month, 1).isoformat(), "to": today.isoformat()}
+    a, b = _date.fromisoformat(cur["from"]), _date.fromisoformat(cur["to"])
+    if unit == "year" or (a.month == 1 and a.day == 1 and b.month == 12 and b.day == 31):
+        prev = {"label": f"{a.year - 1}", "from": _date(a.year - 1, 1, 1).isoformat(), "to": _date(a.year - 1, 12, 31).isoformat()}
+    else:
+        y, m = (a.year, a.month - 1) if a.month > 1 else (a.year - 1, 12)
+        prev = {"label": f"{calendar.month_name[m]} {y}", "from": _date(y, m, 1).isoformat(), "to": _date(y, m, calendar.monthrange(y, m)[1]).isoformat()}
+    named_prev = whole if whole and whole.get("period_type") in ("previous_month", "previous_year") else None
+    if PREV_CUE.search(q) and named_prev and len(found) <= 1:
+        # "pichhle month se difference": the named period IS the earlier one; the current one is the analysis period (or this month)
+        prev = {"label": named_prev.get("label") or named_prev["from"], "from": named_prev["from"], "to": named_prev["to"]}
+        cur = None
+        if state and (state.get("period") or {}).get("from"):
+            sp = state["period"]
+            if sp["from"] != prev["from"]:
+                cur = {"label": sp.get("label") or sp["from"], "from": sp["from"], "to": sp["to"]}
+        if cur is None:
+            cur = {"label": "this month", "from": _date(today.year, today.month, 1).isoformat(), "to": today.isoformat()} if unit == "month" else \
+                  {"label": "this year", "from": _date(today.year, 1, 1).isoformat(), "to": today.isoformat()}
+    return [cur, prev]
 
 
 TOTAL_CUES = re.compile(r"\b(total|sum|sold|sale|sell|bik[aei]|bech[aei]|quantity|qty|units?|pieces?|pcs|volume|kitna maal|nikl[aei])\b", re.I)
@@ -262,14 +429,14 @@ def ambiguity(question, columns, intent, state=None, known=()):
     # B. "items count": SUM of a quantity column, or the number of distinct item-like values? Both exist → ask.
     for m in intent.get("new_metrics", intent.get("metrics")) or []:       # only what THIS message asks for, not inherited state
         ent = m.get("entity")
-        if m.get("kind") == "count" and ent and (ent in ITEM_LIKE or ent == "item") and "count:item" not in known and not m.get("distinct") and not TOTAL_CUES.search(q):
+        if m.get("kind") == "count" and ent and (ent in ITEM_LIKE or ent == "item") and "count:item" not in known and not m.get("distinct") and not TOTAL_CUES.search(q) and not intent.get("additive"):
             item_dims = [c["name"] for c in dims if {stem(t) for t in tokens(c["name"])} & ITEM_LIKE]
             if qtys and item_dims:
                 return {"key": "count:item", "question": "Items count se kya matlab — total quantity (kitna maal bika), ya alag-alag item types ki ginti?",
                         "options": [{"label": f"Total quantity — SUM of {qtys[0]}", "choice": ["count:item", qtys[0]], "rewrite": None},
                                     {"label": f"Different item types — distinct {item_dims[0]}", "choice": ["count:item", item_dims[0]], "rewrite": None}]}
     # A. A ranking ("top 5 sales wale") with no dimension actually named: per which column, or individual rows?
-    if intent.get("top_n") and not intent.get("group_by") and not state.get("group_by") and not ROWS_CUES.search(q):
+    if intent.get("top_n") and not intent.get("group_by") and not state.get("group_by") and not ROWS_CUES.search(q) and not ranked_entity(q, columns, intent.get("metrics") or []):
         full, partial = dimension_matches(q, columns)
         cands = (partial or [c["name"] for c in dims])[:3]
         if cands:

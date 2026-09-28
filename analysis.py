@@ -152,11 +152,30 @@ def execute_state(conv, state, tools, question="", log=None):
         table_measures = [m for m in measures if m not in trivial]
     else:
         table_measures = measures
-    if grain:
+    rank_scope = state.get("rank_scope") if state.get("top_n") else None
+    if rank_scope and rank_scope not in keys:
+        rank_scope = None                                  # "September ki sales" after a month-wise ranking: no period axis any more → global
+    if grain and not rank_scope:
         merged = complete_periods(merged, keys, grain, period.get("from"), period.get("to"))
-    if state.get("top_n") and keys:
-        by = table_measures[0]["label"]
+    # The ranking metric: the money measure when the user asked for one, else the first measure ("rank by AMOUNT, show AMOUNT + QTY").
+    rank_by = (next((m for m in table_measures if m.get("kind") == "monetary"), table_measures[0]) if state.get("top_n") else table_measures[0]) if table_measures else None
+    full = merged.copy()                                   # every group, before any top-N cut: the all-data totals come from here
+    if state.get("share") and keys and rank_by is not None and len(full):
+        tot = float(pd.to_numeric(full[rank_by["label"]], errors="coerce").sum())
+        merged["Share %"] = (pd.to_numeric(merged[rank_by["label"]], errors="coerce") / tot * 100).round(2) if tot else 0.0
+    cut = False
+    if state.get("top_n") and keys and rank_scope:
+        # TOP-N PER GROUP: rank inside each period / scope value, never sort-all + head.
+        by, asc, n = rank_by["label"], state.get("sort") == "asc", int(state["top_n"])
+        merged = merged[pd.to_numeric(merged[by], errors="coerce").notna()]
+        merged = merged.sort_values([rank_scope, by], ascending=[True, asc], kind="stable")
+        merged = merged.groupby(rank_scope, sort=False, group_keys=False).head(n)
+        merged = merged.sort_values([rank_scope, by], ascending=[True, asc], kind="stable")
+        cut = len(merged) < len(full)
+    elif state.get("top_n") and keys:
+        by = rank_by["label"]
         merged = merged.sort_values(by, ascending=(state.get("sort") == "asc")).head(int(state["top_n"]))
+        cut = len(merged) < len(full)
     elif keys:
         merged = merged.sort_values(keys, kind="stable")
     merged = merged.reset_index(drop=True)
@@ -168,15 +187,37 @@ def execute_state(conv, state, tools, question="", log=None):
             val = (tot.get("rows") or [{}])[0].get("value")
             cards.append({"label": m["label"], "value": val, "note": "unique over the whole range"})
         else:
-            val = float(pd.to_numeric(merged[m["label"]], errors="coerce").sum()) if len(merged) else 0.0
-            cards.append({"label": m["label"], "value": val, "note": "total"})
+            val = float(pd.to_numeric(full[m["label"]], errors="coerce").sum()) if len(full) and m["label"] in full.columns else 0.0
+            cards.append({"label": m["label"], "value": val, "note": "total (all data)" if cut else "total"})
+    # Totals block: the all-data total is never confused with the sum of the displayed top-N rows.
+    totals = None
+    if keys and len(merged):
+        summable = [m for m in table_measures if m["aggregation"] in ("sum", "count")]
+        if summable:
+            totals = {"all": {m["label"]: float(pd.to_numeric(full[m["label"]], errors="coerce").sum()) for m in summable},
+                      "displayed": {m["label"]: float(pd.to_numeric(merged[m["label"]], errors="coerce").sum()) for m in summable},
+                      "cut": cut, "rows": int(len(merged)), "groups": int(len(full)),
+                      "label": (f"Displayed Top {int(state['top_n'])} Total" if cut else "Grand Total")}
     labels = ", ".join(m["label"] for m in table_measures)
     span = f"{_ddmmyyyy(period.get('from'))} → {_ddmmyyyy(period.get('to'))}" if period.get("from") or period.get("to") else ""
     how = "; ".join(f"{m['label']} = {'unique count of' if m['aggregation'] == 'count_distinct' else m['aggregation'].upper() + ' of'} {m['column']}" for m in measures)
-    if keys and not len(merged):
+    if state.get("share"):
+        how += f"; Share % = {rank_by['label']} ÷ all-data total"
+    if keys and rank_scope and len(merged):
+        ranked = next((k for k in keys if k != rank_scope), keys[-1])
+        word = "top" if state.get("sort") != "asc" else "bottom"
+        head_txt = (f"{'Month' if rank_scope == 'period' and grain == 'month' else ('Har ' + rank_scope)}-wise {word} {int(state['top_n'])} {ranked} by {rank_by['label']}"
+                    + (f" ({period.get('label') or span})" if span else "") + f" — {len(merged)} rows.")
+        first = merged.iloc[0]
+        text = head_txt + f"\nCalculation: {how}." + (f"\nPehla: {first[rank_scope]} → {first[ranked]} ({_fmt(float(first[rank_by['label']]), rank_by['column'])})." if len(merged) else "")
+        if cut and totals:
+            text += f"\n{rank_by['label']} all-data total: {_fmt(totals['all'][rank_by['label']], rank_by['column'])}."
+    elif keys and not len(merged):
         text = f"{(grain or ', '.join(keys)).title()}-wise: {labels}" + (f" ({period.get('label') or span})" if span else "") + " — is range mein koi data nahi mila.\nCalculation: " + how + "."
     elif keys:
         text = (f"{(grain or ', '.join(keys)).title()}-wise: {labels}" + (f" ({period.get('label') or span})" if span else "") + f" — {len(merged)} rows.\n" + f"Calculation: {how}.")
+        if cut and totals and rank_by is not None:
+            text += f"\n{rank_by['label']}: displayed {int(state['top_n'])} rows ka jod {_fmt(totals['displayed'][rank_by['label']], rank_by['column'])}; poore data ka total {_fmt(totals['all'][rank_by['label']], rank_by['column'])}."
         if len(merged) and not state.get("top_n"):
             m0 = table_measures[0]
             best = merged.iloc[int(pd.to_numeric(merged[m0['label']], errors='coerce').fillna(0).idxmax())]
@@ -203,14 +244,20 @@ def execute_state(conv, state, tools, question="", log=None):
     plan = {"status": "execute", "mode": "data", "operation": "multi_metric", "source_id": sid, "sheet_name": table.get("name"), "metric": measures[0]["column"],
             "aggregation": measures[0]["aggregation"], "metrics": measures, "group_by": list(state.get("group_by") or []), "date_column": date_col if (period or grain) else None,
             "date_grain": grain, "date_from": period.get("from"), "date_to": period.get("to"), "filters": state.get("filters") or [], "top_n": state.get("top_n"), "sort": state.get("sort"),
+            "rank_scope": rank_scope, "rank_by": rank_by["column"] if rank_by else None,
             "period": period_metadata(period), "title": f"{(grain or (', '.join(keys) if keys else period.get('label') or 'Total')).title()} — {labels}"}
-    conv.state = dict(state, metrics=state.get("metrics") or [], resolved=measures, sheet_name=table.get("name"), date_column=date_col)
+    conv.state = dict(state, metrics=state.get("metrics") or [], resolved=measures, sheet_name=table.get("name"), date_column=date_col, rank_scope=rank_scope)
     conv.last_plan = plan
     conv.recent_plans = (conv.recent_plans + [{"question": question, "plan": plan}])[-5:]
     log("ai_done", tools=calls, transport=getattr(tools, "transport", "?"), source=sid, sheet=table.get("name"))
     if not keys:
         return Reply(text, kind="answer", df=None, metric=measures[0]["column"], plan=plan, value=float(merged[measures[0]["label"]].iloc[0]) if len(merged) and len(measures) == 1 else None, cards=cards)
-    chart = {"type": "line" if "period" in keys else "bar", "x": keys[0], "y": table_measures[0]["label"]} if len(merged) >= 2 else None
+    ychart = (rank_by or table_measures[0])["label"]
+    if rank_scope and len(keys) == 2:
+        ranked = next(k for k in keys if k != rank_scope)
+        chart = {"type": "bar", "x": rank_scope, "y": ychart, "color": ranked} if len(merged) >= 2 else None    # month on X, amount on Y, winner as colour
+    else:
+        chart = {"type": "line" if "period" in keys else "bar", "x": keys[0], "y": ychart} if len(merged) >= 2 else None
     from pivot import describe, pivot_table, should_pivot
     if should_pivot(keys, table_measures, merged, question) and not state.get("top_n"):
         wide = pivot_table(merged, keys, table_measures[0]["label"])
@@ -218,7 +265,8 @@ def execute_state(conv, state, tools, question="", log=None):
         if explain and period:
             text += "\n" + describe_period(period, _ddmmyyyy)
         return Reply(text, kind="answer", df=wide, chart=None, metric=table_measures[0]["column"], plan=plan, cards=cards, pivot=True, long_df=merged)
-    return Reply(text, kind="answer", df=merged, chart=chart, metric=table_measures[0]["column"], plan=plan, cards=cards, drillable="period" if "period" in keys else None)
+    return Reply(text, kind="answer", df=merged, chart=chart, metric=(rank_by or table_measures[0])["column"], plan=plan, cards=cards, totals=totals,
+                 drillable="period" if "period" in keys and not rank_scope else None)
 
 
 def _execute_asks(conv, state, tools, question, log, sid, table, measures, common, asks, period, date_col, concise, explain):
@@ -240,6 +288,17 @@ def _execute_asks(conv, state, tools, question, log, sid, table, measures, commo
         lines.append(f"• {a['label']} ({_ddmmyyyy(a['from'])} → {_ddmmyyyy(a['to'])}): " + ", ".join(f"{m['label']} {_fmt(v, m['column'])}" if len(measures) > 1 else _fmt(v, m["column"]) for m, v in vals))
     how = "; ".join(f"{m['label']} = {'unique count of' if m['aggregation'] == 'count_distinct' else m['aggregation'].upper() + ' of'} {m['column']}" for m in measures)
     text = "\n".join(lines) + ("" if concise else f"\nCalculation: {how}.")
+    if len(asks) == 2 and period.get("compare"):
+        # Comparison: difference and % change computed here, never by the model. asks[0] = current, asks[1] = the earlier one.
+        by_label = {}
+        for a, m, v in [(a, m, v) for a in asks for m, v in [(m, next((c["value"] for c in cards if c["label"] in (a["label"], f"{a['label']} — {m['label']}")), 0.0)) for m in measures]]:
+            by_label.setdefault(m["label"], {})[a["label"]] = v
+        for m in measures:
+            cur, prev = by_label[m["label"]].get(asks[0]["label"], 0.0), by_label[m["label"]].get(asks[1]["label"], 0.0)
+            diff = cur - prev
+            pct = (diff / prev * 100) if prev else None
+            text += f"\n{m['label']}: {asks[0]['label']} vs {asks[1]['label']} → difference {'+' if diff >= 0 else '-'}{_fmt(abs(diff), m['column'])}" + (f" ({pct:+.1f}%)" if pct is not None else " (earlier period had 0)")
+            cards.append({"label": f"Change — {m['label']}" if len(measures) > 1 else "Change", "value": diff, "note": f"{asks[0]['label']} minus {asks[1]['label']}" + (f", {pct:+.1f}%" if pct is not None else "")})
     if explain:
         text += "\n" + describe_period(period, _ddmmyyyy)
     plan = {"status": "execute", "mode": "data", "operation": "multi_metric", "source_id": sid, "sheet_name": table.get("name"), "metric": measures[0]["column"],
