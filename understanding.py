@@ -18,7 +18,7 @@ def parse_period(question, today=None):
 
 
 GRAIN_WORDS = [("day", r"\b(day|days|daily|din|date wise|date-wise|datewise|roz|dainik|har din)\b"),
-               ("month", r"\b(month wise|month-wise|monthwise|monthly|mahin\w*|maheen\w*|har month|per month|month by month|masik)\b"),
+               ("month", r"\b(month wise|month-wise|monthwise|monthly|mahin\w*|maheen\w*|har month|per month|month by month|masik|mont wise|mont-wise|mnth wise|monthwise)\b"),
                ("year", r"\b(year wise|year-wise|yearly|saal wise|har saal|annual)\b")]
 POSTFIX_GROUP = {stem(w) for w in ("wise", "hisaab", "hisab", "anusar", "vaar", "war")}     # "<dimension> wise"
 PREFIX_GROUP = {stem(w) for w in ("per", "by", "each", "every", "har")}                      # "per <dimension>"
@@ -55,7 +55,14 @@ def dimension_matches(question, columns):
     toks = [stem(t) for t in tokens(question)]
     qt = {stem(t) for t in content_tokens(question)}
     def counted(ct):   # "customer count" / "kitne students": that entity is counted, not grouped by
-        return any(t in ct and any(x in COUNT_CUES for x in toks[max(0, i - 2):i + 3]) for i, t in enumerate(toks))
+        for i, t in enumerate(toks):
+            if t not in ct:
+                continue
+            if any(x in POSTFIX_GROUP for x in toks[i + 1:i + 3]):
+                continue                                    # "… count customer name wise": an explicit grouping, not a count
+            if any(x in COUNT_CUES for x in toks[max(0, i - 2):i + 3]):
+                return True
+        return False
     full, partial = [], []
     named = [(c["name"], {stem(t) for t in tokens(c["name"])}) for c in columns if {stem(t) for t in tokens(c["name"])} <= qt]   # columns named in full
     for c in columns:
