@@ -162,6 +162,11 @@ class SourceRegistry:
         learning.forget_source(workspace_id, source_id)
         with _cache_lock:
             _cache.pop(source_id, None)
+        try:
+            import rag
+            rag.forget(source_id)                      # its knowledge chunks go with it
+        except Exception:
+            pass
         log_event("source_removed", source_id=source_id)
 
     # ------------------------------------------------------------ data

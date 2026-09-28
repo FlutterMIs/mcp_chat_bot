@@ -279,7 +279,11 @@ def requested_measures(question, columns):
             item = ("count", entity_of(t) if t in _SYN_OF else t)     # "customer count" / "total items" — but not "customer wise"
         if item and item not in seen:
             seen.add(item)
-            out.append({"kind": item[0], "entity": item[1], "column_hint": dims.get(item[1]) if item[1] else None})
+            hint = dims.get(item[1]) if item[1] else None
+            if item[0] in ("monetary", "quantity"):
+                # "closing stock batao" names the column in full: that column, not a sibling of the same kind
+                hint = next((c["name"] for c in named_columns(question, columns) if column_kind(c) == item[0]), None)
+            out.append({"kind": item[0], "entity": item[1], "column_hint": hint})
     return out
 
 
@@ -347,7 +351,8 @@ def only_known_words(question, columns, sheet_names=None):
                                            "kam", "zyada", "jada", "jyada", "highest", "lowest", "least", "most", "maximum", "minimum", "max", "min", "bekar", "kharab", "achha", "accha",
                                            "make", "it", "change", "badlo", "badal", "instead", "same", "again", "dobara", "wapas", "details", "detail", "dikha", "list", "show", "give",
                                            "tell", "want", "need", "please", "ok", "okay", "haan", "nahi", "nhi", "ki", "ka", "ke", "wala", "vale", "hi", "to", "toh", "na",
-                                           "add", "jodo", "jod", "include", "plus", "saath", "sath", "too", "also", "as", "well", "remove", "hatao", "hata", "without", "bina", "sirf")}
+                                           "add", "jodo", "jod", "include", "plus", "saath", "sath", "too", "also", "as", "well", "remove", "hatao", "hata", "without", "bina", "sirf",
+                                           "vs", "versus", "cross", "crosstab", "pivot", "matrix", "by")}
         import calendar
         KNOWN_WORDS |= {stem(w) for w in ("month", "months", "mahina", "mahine", "maheena", "maheene", "monthly", "day", "days", "din", "daily", "week", "weeks", "hafta", "hafte", "weekly",
                                            "year", "years", "saal", "yearly", "annual", "date", "dates", "datewise", "today", "aaj", "yesterday", "kal", "last", "this", "current", "previous",
@@ -366,6 +371,14 @@ def only_known_words(question, columns, sheet_names=None):
     period_words = set(tokens(p["date_expression"])) if p else set()          # "last two months" / "August September" are understood by the resolver
     col_words = {stem(t) for c in columns for t in tokens(c["name"])} | {stem(t) for n in (sheet_names or []) for t in tokens(n)}
     return all(stem(t) in KNOWN_WORDS or stem(t) in col_words or t.isdigit() or t in period_words for t in content_tokens(question))
+
+
+def knowledge_words(question, columns):
+    """Content words that are neither analysis vocabulary, nor column/sheet names, nor a period: the part of a question
+    that could only be answered from documents ("return policy", "warranty", "SOP")."""
+    only_known_words("", columns)                                 # builds KNOWN_WORDS (month names and time words included)
+    col_words = {stem(t) for c in columns for t in tokens(c["name"])}
+    return [t for t in content_tokens(question) if stem(t) not in KNOWN_WORDS and stem(t) not in col_words and not t.isdigit()]
 
 
 def value_words(question, columns):
@@ -422,6 +435,8 @@ def resolve_measures(measures, columns, choices=None):
             continue
         if kind in ("monetary", "quantity"):
             cands = primary_only(by_kind(kind))
+            if len(cands) > 1 and m.get("column_hint") in [c["name"] for c in cands]:
+                cands = [c for c in cands if c["name"] == m["column_hint"]]           # the column the user spelled out
             if len(cands) == 1:
                 c = cands[0]
                 out.append({"column": c["name"], "aggregation": "sum", "label": ("Sales Amount" if kind == "monetary" else "Items Count") if len(measures) > 1 else c["name"], "kind": kind})

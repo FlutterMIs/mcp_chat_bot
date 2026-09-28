@@ -55,6 +55,8 @@ class Reply:
     options: list = field(default_factory=list)    # clarification choices (rendered as chips / numbered list)
     drillable: str | None = None                   # column whose rows can be clicked for a drill-down ("period")
     files: list = field(default_factory=list)      # generated files [{"name","bytes","mime"}] (reports)
+    pivot: bool = False                            # df is a cross-tab (rows × columns of one measure): table only, no chart
+    long_df: pd.DataFrame | None = None            # the long (period/dimension/value) result behind a pivot, for exports/charts
 
 
 class LocalTools:
@@ -469,8 +471,17 @@ def answer(conv, question, api_key, model, tools, log=None):
                     raise ValueError(f"Source '{sid}' connected nahi hai. Connected sources: {', '.join(conv.schemas)}")
                 retrieved = tools.call("search_source", {"source_id": sid, "query": question})
                 calls.append("search_source")
+                if retrieved.get("no_match"):
+                    # RAG found no relevant passage: say so without calling the model (no guessing, no spend).
+                    name = str(retrieved.get("name") or "connected document").split(" – ")[0].split(" | ")[0]
+                    return _done(conv, question, Reply(f"Is baare mein *{name}* mein kuch nahi mila. Document mein jo likha hai uske baare mein poochiye.",
+                                                       kind="out_of_scope" if plan.get("fallback_refusal") is not None else "text", plan=plan))
                 got = ai.answer_text(question, retrieved)
                 text = got.get("answer", "")
+                if got.get("found") is not False and retrieved.get("citations"):
+                    from mcp_server import citation_footer
+                    foot = citation_footer(retrieved["citations"])
+                    text = (text.rstrip() + "\n\n" + foot) if foot else text
                 if got.get("found") is False:
                     # Not on the page: one clear line from code (no "retrieved source" jargon, no guessing).
                     name = str(retrieved.get("name") or "connected page").split(" – ")[0].split(" | ")[0]
@@ -487,6 +498,8 @@ def answer(conv, question, api_key, model, tools, log=None):
                 reply = Reply(grounded_answer(ai, question, plan, result, conv), df=None if single else df, chart=None if single else chart_hint(plan, df),
                               metric=result.get("metric") or plan.get("metric"), plan=plan, want_chart=bool(plan.get("want_chart")),
                               value=(float(df["value"].iloc[0]) if single and pd.api.types.is_number(df["value"].iloc[0]) and not isinstance(df["value"].iloc[0], bool) else None))
+                apply_pivot(reply, plan, question)
+                attach_entity_images(reply, question)
             conv.last_plan = plan
             conv.recent_plans = (conv.recent_plans + [{"question": question, "plan": plan}])[-5:]
             add_plan(question, plan, validated=untouched and attempt == 0 and plan.get("mode") != "text")
@@ -504,6 +517,12 @@ def answer(conv, question, api_key, model, tools, log=None):
                 sheet=plan.get("sheet_name"), ms=int((time.time() - t0) * 1000))
             return _done(conv, question, reply)
         except (ValueError, KeyError) as e:
+            from entities import AmbiguousValue
+            if isinstance(e, AmbiguousValue):
+                # "Pranjli ji" fits several real names about equally: ask, never pick one silently.
+                conv._asked_for = question
+                opts = [{"label": v, "choice": None, "rewrite": _replace_value(question, e.typed, v)} for v in e.candidates]
+                return _done(conv, question, _ask(conv, log, "entity:" + str(e.column), f"“{e.typed}” se aapka matlab kaun sa {e.column} hai?", opts))
             log("plan_failed", attempt=attempt, error=str(e)[:300])
             if attempt == 2:
                 # The direct pipeline could not produce a valid plan: let the bounded agent inspect the data itself.
@@ -647,6 +666,11 @@ def understood_reply(conv, question, tools, log):
         if _names_other_table(question, cols, conv):
             state = {}                      # "closing stock kitna hai?" mid-conversation: that column lives in another sheet → fresh question
             log("route_switch_table")
+            from semantics import value_words as _vw
+            every = [c for s in conv.schemas.values() for t in (s.get("sheets") or [{"columns": s.get("columns", [])}]) for c in t.get("columns", [])]
+            if _vw(question, every):
+                log("route_planner", reason="switched table + value words — a filter the planner must apply")
+                return None
     if not state:
         pick, rivals = _likely_table(conv, question)
         cols = list((pick[2] if pick else {}).get("columns", []))
@@ -717,7 +741,13 @@ def _names_other_table(question, cols, conv):
     qt = {stem(t) for t in content_tokens(question)}
     here = {c["name"] for c in cols}
     here_tokens = {stem(x) for c in cols for x in tokens(c["name"])}
+    current = (conv.state or {}).get("sheet_name")
     for schema in conv.schemas.values():
+        # "September ki sales kitni hai?" while the state is on INVENTORY: another tab is named outright → fresh question there
+        for t in schema.get("sheets") or []:
+            st = {stem(x) for x in tokens(t.get("name") or "")}
+            if t.get("name") and t.get("name") != current and st and st <= qt and not ({stem(x) for x in tokens(current or "")} & qt):
+                return True
         for t in schema.get("sheets") or [{"columns": schema.get("columns", [])}]:
             for c in t.get("columns", []):
                 if c["name"] in here:
@@ -871,6 +901,62 @@ def _pick_option(text, candidates):
     return hits[0] if len(hits) == 1 else None
 
 
+def apply_pivot(reply, plan, question=""):
+    """A two-key aggregate (period × dimension, or dimension × dimension) with one measure reads best as a cross-tab.
+    The long result stays on reply.long_df; the numbers are only re-arranged."""
+    from pivot import describe, pivot_table, should_pivot
+    if reply.df is None or (plan or {}).get("operation") != "aggregate" or "value" not in reply.df.columns:
+        return reply
+    keys = (["period"] if plan.get("date_grain") else []) + [g for g in plan.get("group_by") or [] if g in reply.df.columns]
+    if not should_pivot(keys, [plan.get("metric")], reply.df, question):
+        return reply
+    wide = pivot_table(reply.df, keys, "value")
+    reply.long_df, reply.df, reply.pivot, reply.chart, reply.drillable = reply.df, wide, True, None, None
+    reply.text = (reply.text or "").rstrip() + "\n" + describe(keys, reply.metric or plan.get("metric") or "value", len(wide) - 1, len(wide.columns) - 2)
+    return reply
+
+
+IMAGE_COL = re.compile(r"(^|[^a-z])(image|img|photo|picture|pic|thumbnail|thumb|logo|icon)(_?url|_?link|s)?($|[^a-z])", re.I)
+
+
+def image_columns(df):
+    """Columns whose name says image/photo/thumbnail AND whose values are real http(s) links — never guessed."""
+    out = []
+    for c in df.columns:
+        if IMAGE_COL.search(str(c)):
+            vals = df[c].dropna().astype(str).str.strip()
+            if len(vals) and vals.str.match(r"^https?://", case=False).mean() >= 0.5:
+                out.append(c)
+    return out
+
+
+def attach_entity_images(reply, question, limit=12):
+    """Entity/image result mode: rows with an image column, when the user asks for images/photos. Real URLs only."""
+    if reply.df is None or reply.df.empty or not IMAGE_Q.search(question or "") or (reply.plan or {}).get("operation") not in ("rows", "query", None):
+        return reply
+    cols = image_columns(reply.df)
+    if not cols:
+        return reply
+    col = cols[0]
+    labels = [c for c in reply.df.columns if c not in cols and not pd.api.types.is_numeric_dtype(reply.df[c])]
+    images = []
+    for _, r in reply.df.head(limit).iterrows():
+        url = str(r[col]).strip()
+        if re.match(r"^https?://", url, re.I):
+            images.append({"alt": " · ".join(str(r[l]) for l in labels[:2] if str(r.get(l, "")).strip()) or url, "url": url})
+    reply.images = images
+    return reply
+
+
+def _replace_value(question, typed, real):
+    """The question with the typed entity replaced by the real one ('Pranjli ji ki sales' → 'Pranjali Ji ki sales')."""
+    out = re.sub(re.escape(str(typed)), real, question, count=1, flags=re.I)
+    if out == question:
+        core = re.sub(r"\b(ji|sahab|sir|madam)\b", "", str(typed), flags=re.I).strip()
+        out = re.sub(re.escape(core), real, question, count=1, flags=re.I) if core else question
+    return out if out != question else f"{question} ({real})"
+
+
 def _ddmmyyyy(d):
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(d or ""))
     return f"{m[3]}-{m[2]}-{m[1]}" if m else (str(d) if d else "")
@@ -964,6 +1050,9 @@ def verify_previous(conv, tools, ai):
 
 
 def _done(conv, question, reply):
+    if reply.kind in ("answer", "agent") and reply.plan and reply.plan.get("mode") != "text":
+        from result_check import enforce
+        reply = enforce(reply, conv.schemas)       # last gate: plan columns/sheet vs schema, finite numbers — or a clear error
     media = ([{"title": v["title"], "url": v["url"]} for v in reply.videos] or [{"title": i["alt"], "url": i["url"]} for i in reply.images]) or None
     conv.history += [{"role": "user", "content": question}, {"role": "assistant", "content": reply.text, "kind": reply.kind, **({"media": media} if media else {})}]
     conv.history = conv.history[-20:]

@@ -94,8 +94,12 @@ def render_assistant(m):
             if fr.get("table_note") or m.get("table_note"):
                 st.caption(fr.get("table_note") or m.get("table_note"))
         with st.container(horizontal=True):
-            st.download_button("⬇️ CSV", df.to_csv(index=False).encode(), "result.csv", "text/csv", key=f"dl_{m['id']}")
-            st.download_button("⬇️ Excel", _xlsx_bytes(df), "result.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dlx_{m['id']}")
+            from exports import MIME, ResultExport
+            ex = ResultExport(title=str(metric or fr.get("source_info", {}).get("metric") or "Result"), question=m.get("question", ""), table=df, value=fr.get("value"),
+                              metrics=cards, source_info=fr.get("source_info") or {}, answer=m["content"])
+            st.download_button("⬇️ CSV", ex.to_csv(), "result.csv", MIME["csv"], key=f"dl_{m['id']}")
+            st.download_button("⬇️ Excel", ex.to_xlsx(), "result.xlsx", MIME["xlsx"], key=f"dlx_{m['id']}")
+            st.download_button("⬇️ PDF", ex.to_pdf(), "result.pdf", MIME["pdf"], key=f"dlp_{m['id']}")
             if st.button("📄 Report", key=f"rep_{m['id']}", help="Summary + data ka Excel report"):
                 st.session_state.pending_q = "report bana do"
                 st.rerun()

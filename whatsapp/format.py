@@ -66,6 +66,12 @@ def result_list(df, metric, limit=LIST_LIMIT):
     if df is None or df.empty:
         return "", 0
     money = is_money(metric)
+    nums = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+    labels = [c for c in df.columns if c not in nums]
+    if "value" not in df.columns and len(nums) == 1 and 1 <= len(labels) <= 2 and len(df) >= 2:
+        # grouped result whose value column carries the measure's name (state executor): a numbered list, not row dumps
+        df = df.rename(columns={nums[0]: "value"})
+        metric, money = nums[0], is_money(nums[0])
     # A label column with one value in every row (e.g. period "2026" on a customer-wise list) is noise.
     if len(df) > 1 and "value" in df.columns:
         df = df[[c for c in df.columns if c == "value" or df[c].nunique(dropna=False) > 1]]

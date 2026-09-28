@@ -144,7 +144,7 @@ def finalize(reply, question="", chart_asked=False, debug=False):
     """Reply → the one FinalResponse the UI renders."""
     import re
     wanted = bool(reply.want_chart or chart_asked or re.search(r"\b(graph|graf|chart|plot|visual)\w*", question or "", re.I))
-    shape = shape_of(reply)
+    shape = "breakdown" if getattr(reply, "pivot", False) and reply.df is not None else shape_of(reply)
     table, note = None, None
     if shape in ("series", "ranking", "breakdown"):
         table = reply.df
@@ -154,8 +154,9 @@ def finalize(reply, question="", chart_asked=False, debug=False):
             note = f"Showing {DETAIL_MAX_ROWS} of {len(reply.df):,} rows — CSV/Excel mein pura data hai."
     elif reply.kind == "report" and reply.df is not None:
         table = reply.df
+    pivot = bool(getattr(reply, "pivot", False))
     fr = FinalResponse(answer=reply.text, kind=reply.kind, shape=shape, metrics=_metrics_for(reply, shape), table=table, table_note=note,
-                       chart=_chart_for(reply, shape, wanted), source_info=_source_info(reply),
+                       chart=None if pivot else _chart_for(reply, shape, wanted), source_info=_source_info(reply),
                        drilldown=reply.drillable if shape in ("series", "ranking", "breakdown") else None,
                        options=list(reply.options or []), files=list(reply.files or []), images=list(reply.images or []), videos=list(reply.videos or []))
     fr.value = reply.value if shape == "scalar" else None

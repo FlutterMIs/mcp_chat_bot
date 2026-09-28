@@ -42,21 +42,21 @@ def resolve_column(df, requested):
 FILTER_OPS = {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "not_in"}
 
 
-def resolve_value(series, value):
-    """Map a user-typed value onto a real value in the column (case, spacing, small typos)."""
+def resolve_value(series, value, column=None):
+    """Map a user-typed value onto a real value in the column (case, spacing, small typos).
+    Several equally close real values → AmbiguousValue (the bot asks); nothing close → None."""
+    from entities import AmbiguousValue, match_entity
     values = [v for v in series.dropna().astype(str).str.strip().unique()]
     want = str(value).strip()
-    for v in values:
-        if v == want:
-            return v
-    by_norm = {norm(v): v for v in values}
-    if norm(want) in by_norm:
-        return by_norm[norm(want)]
+    m = match_entity(values, want)
+    if m["status"] in ("exact", "single"):
+        return m["value"]
+    if m["status"] == "ambiguous":
+        raise AmbiguousValue(column or series.name, want, m["candidates"])
     starts = [v for v in values if norm(v).startswith(norm(want)) or norm(want).startswith(norm(v))]
     if len(starts) == 1 and len(norm(want)) >= 3:
         return starts[0]
-    close = difflib.get_close_matches(norm(want), list(by_norm), n=1, cutoff=0.8)
-    return by_norm[close[0]] if close else None
+    return None
 
 
 def apply_filters(df, filters):
@@ -93,12 +93,17 @@ def apply_filters(df, filters):
             else:
                 mask = col.astype(str).str.contains(str(raw), case=False, regex=False, na=False)
                 if not mask.any():
-                    raise ValueError(f'No rows contain "{raw}" in column "{c}".')
+                    # "Pranjli ji" typed for "Pranjali Ji": a clear closest real value is used (and reported); a tie is asked.
+                    fixed = resolve_value(col, raw, column=c)
+                    if fixed is None:
+                        raise ValueError(f'No rows contain "{raw}" in column "{c}".')
+                    notes.append(f'"{raw}" → "{fixed}" ({c})')
+                    mask = col.astype(str).map(norm) == norm(fixed)
         else:
             wanted = raw if isinstance(raw, list) else [raw]
             real = []
             for w in wanted:
-                r = resolve_value(col, w)
+                r = resolve_value(col, w, column=c)
                 if r is None:
                     sample = ", ".join(col.dropna().astype(str).str.strip().value_counts().index[:15])
                     raise ValueError(f'Value "{w}" not found in column "{c}". Real values include: {sample}')
@@ -109,6 +114,35 @@ def apply_filters(df, filters):
             mask = ~hit if op in {"ne", "not_in"} else hit
         work = work[mask]
     return work, notes
+
+
+def citations(hits):
+    """Deduplicated [{"source", "page", "section"}] of retrieved chunks — the only citations an answer may carry."""
+    out, seen = [], set()
+    top = max((h.get("score") or 0) for h in hits) if hits else 0
+    for h in hits or []:
+        if top and (h.get("score") or 0) < 0.6 * top:
+            continue                                  # weak neighbours are context for the model, not a citation
+        key = (h.get("source"), h.get("page"), h.get("section"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"source": h.get("source"), "page": h.get("page"), "section": h.get("section")})
+    return out
+
+
+def citation_footer(cites):
+    """'📄 Source: Return_Policy.pdf, Page 4 · Return_Policy.pdf, Page 5'. Empty when there is nothing to cite."""
+    parts = []
+    for c in cites or []:
+        s = str(c.get("source") or "document")
+        if c.get("page"):
+            s += f", Page {c['page']}"
+        elif c.get("section"):
+            s += f" — {c['section']}"
+        if s not in parts:
+            parts.append(s)
+    return ("📄 Source: " + " · ".join(parts[:4])) if parts else ""
 
 
 class MCPServer:
@@ -124,6 +158,11 @@ class MCPServer:
 
     def register_file(self, source_id, parsed):
         self.sources[source_id] = parsed
+        try:
+            import rag
+            rag.index_source(source_id, parsed)          # no-op unless RAG_ENABLED and the source has text
+        except Exception:
+            pass                                          # the knowledge layer never blocks a source from connecting
         return self.source_schema(source_id)
 
     def source_schema(self, source_id):
@@ -309,6 +348,15 @@ class MCPServer:
         src=self.sources[source_id]
         text=src.get("text","")
         base={"source":src.get("kind"),"name":src.get("name"),"url":src.get("url")}
+        import rag
+        if rag.enabled() and rag.has_index(source_id):
+            # Hybrid RAG: only the relevant chunks (with source/page/section/score), never the whole document.
+            hits=rag.search(source_id,query)
+            if not hits:
+                return base|{"text":"","chunks":[],"no_match":True}
+            joined="\n\n".join(f"[{h['source']}" + (f", page {h['page']}" if h.get("page") else "") + (f", {h['section']}" if h.get("section") else "") + f"]\n{h['text']}" for h in hits)
+            return base|{"text":joined[:max_chars],"chunks":[{k:h[k] for k in ("chunk_id","text","source","page","section","score")} for h in hits],
+                         "citations":citations(hits)}
         if len(text)<=max_chars:
             return base|{"text":text}
         terms=[t for t in re.findall(r"[a-zA-Z0-9]{3,}",query.lower()) if t not in self.STOPWORDS]
@@ -376,6 +424,9 @@ class MCPServer:
         try:
             return self._call_tool(name,args)
         except ValueError as e:
+            from entities import AmbiguousValue
+            if isinstance(e, AmbiguousValue):
+                raise                                   # the analyst turns this into a choice for the user
             # A filter value missing from the chosen sheet: say where it does exist, so the planner can switch.
             msg=str(e)
             if name in ("aggregate_source","query_source") and ("not found in column" in msg or "No rows contain" in msg or "Filter column" in msg):

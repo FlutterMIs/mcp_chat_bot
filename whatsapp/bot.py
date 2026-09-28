@@ -357,6 +357,8 @@ class WhatsAppBot:
         return ws
 
     def ask(self, msg, key, state, question):
+        import prompt_builder
+        prompt_builder.set_channel("whatsapp")          # presentation only; the numbers are the same as on the web
         try:
             schemas = self.sources.ensure(self.chat_specs(state))
         except SourceUnavailable:

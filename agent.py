@@ -94,6 +94,7 @@ class Agent:
         self.requested = requested or []          # measures the user asked for; the final table must cover them all
         self.log = log or (lambda *a, **k: None)
         self.store = ResultStore()
+        self.citations = []                        # document passages the loop actually retrieved (RAG); added to the answer by code
         self.trace = []
         self.calls = 0
         self.started = time.time()
@@ -122,7 +123,12 @@ class Agent:
         if name == "distinct_values":
             return self.tools.call("distinct_values", {"source_id": sid, "sheet_name": sheet, "column": args["column"], "limit": int(args.get("limit") or 30)})
         if name == "search_text":
-            return self.tools.call("search_source", {"source_id": sid, "query": args["query"]})
+            obs = self.tools.call("search_source", {"source_id": sid, "query": args["query"]})
+            if obs.get("citations"):
+                self.citations += [c for c in obs["citations"] if c not in self.citations]
+            if obs.get("no_match"):
+                obs = dict(obs, error="No relevant passage in this document for that query. Do not invent policy/knowledge text.")
+            return obs
         if name in ("join_results", "calculate", "sort_limit"):
             return self._run_other(name, args)
         if name in ("aggregate_data", "query_data", "compare_periods"):
@@ -194,7 +200,8 @@ class Agent:
 
     # ---------- the loop ----------
     def run(self):
-        sys_prompt = SYSTEM.format(steps=MAX_STEPS, calls=MAX_TOOL_CALLS)
+        from prompt_builder import planner_section, presentation_section
+        sys_prompt = SYSTEM.format(steps=MAX_STEPS, calls=MAX_TOOL_CALLS) + planner_section() + presentation_section()
         messages = [{"role": "system", "content": sys_prompt},
                     {"role": "user", "content": json.dumps({"question": self.question, "reply_in": reply_language(self.question), "today": time.strftime("%Y-%m-%d"),
                                                              "sources": _tools_schema_for_llm(self.conv.schemas), "previous_plan": self.conv.last_plan,
@@ -330,6 +337,9 @@ class Agent:
         df = self.store.df(rid) if rid in self.store.items else None
         plan = {"source_id": self.store.items[rid]["source_id"], "sheet_name": self.store.items[rid]["sheet_name"], "title": self.store.items[rid]["label"]} if rid in self.store.items else None
         chart = chart_hint({"group_by": [c for c in df.columns if c != "value"][:1], "date_grain": "month" if df is not None and "period" in df.columns else None}, df) if df is not None and "value" in (df.columns if df is not None else []) else None
+        if self.citations:
+            from mcp_server import citation_footer
+            answer = answer.rstrip() + "\n\n" + citation_footer(self.citations)
         return Reply(answer, kind="agent", df=df if df is not None and len(df) > 1 else None, chart=chart, plan=plan,
                      metric=self.store.items[rid]["result"].get("metric") if rid in self.store.items else None, trace=list(self.trace))
 
@@ -413,6 +423,20 @@ def classify(question, schemas, direct_failed=False):
                 return "complex"
     if len(matched) >= 2 and MULTI_PART.search(question):
         return "complex"
+    # HYBRID (RAG on): the question touches a data table AND a knowledge document ("September sales aur return policy ke
+    # according kya action hona chahiye?") → the agent runs the data tools and search_text together.
+    if matched:
+        try:
+            import rag
+            docs = [sid for sid, s in schemas.items() if s.get("kind") not in (None, "table", "workbook")]
+            if docs and rag.enabled():
+                from semantics import requested_measures, question_intent, knowledge_words
+                cols = [c for s in schemas.values() for t in (s.get("sheets") or [{"columns": s.get("columns", [])}]) for c in t.get("columns", [])]
+                resid = knowledge_words(question, cols)          # words that are neither data vocabulary nor column names
+                if resid and (requested_measures(question, cols) or question_intent(question)["time"]) and rag.hits_any(docs, " ".join(resid)):
+                    return "complex"
+        except Exception:
+            pass
     if COMPLEX_WORDS.search(question) and len(schemas) >= 1 and any((s.get("sheets") and len(s["sheets"]) > 1) or len(schemas) > 1 for s in schemas.values()):
         return "complex"
     return "simple"

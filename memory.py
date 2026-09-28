@@ -21,6 +21,11 @@ _scope = contextvars.ContextVar("memory_scope", default=None)
 def set_scope(workspace_id, user_id=None):
     """Route learning to the database for this workspace (for the current thread / request). None → JSON file."""
     _scope.set({"workspace_id": workspace_id, "user_id": user_id} if workspace_id else None)
+    try:
+        import prompt_builder
+        prompt_builder.set_workspace(workspace_id)       # the workspace's AI instructions follow the same scope
+    except Exception:
+        pass
 
 
 def scope():

@@ -97,8 +97,9 @@ def read_file(name: str, data: bytes):
         return {"kind": "document", "name": name, "text": text}
     if ext == "pdf":
         reader = PdfReader(io.BytesIO(data))
-        text = "\n\n".join((p.extract_text() or "") for p in reader.pages)
-        return {"kind": "document", "name": name, "text": text}
+        pages = [{"page": i, "text": (p.extract_text() or "")} for i, p in enumerate(reader.pages, 1)]
+        text = "\n\n".join(p["text"] for p in pages)
+        return {"kind": "document", "name": name, "text": text, "pages": pages}      # pages: page-level text for citations (RAG)
     if ext == "docx":
         doc = Document(io.BytesIO(data))
         text = "\n".join(p.text for p in doc.paragraphs)

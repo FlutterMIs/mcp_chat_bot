@@ -1,6 +1,6 @@
-# PROJECT_STATE.md — MCP Universal Business Analyst (V6)
+# PROJECT_STATE.md — MCP Universal Business Analyst (V8)
 
-Last updated: 2026-09-27. Architecture and every module's role are in `README.md` (this file lists what is not obvious there).
+Last updated: 2026-09-28. Architecture and every module's role are in `README.md` (this file lists what is not obvious there).
 
 ## 1. What it is
 Streamlit web app + WhatsApp bot sharing one brain (`analyst.answer`). OpenRouter LLM reads language; MCP-style read-only
@@ -17,9 +17,18 @@ tools compute; every number is validated in code (`grounding.py`, `semantics.val
 | `response.py` | `finalize` → one `FinalResponse` per message (shape: scalar/series/ranking/breakdown/detail/text), `display_table` |
 | `agent.py`, `resultstore.py` | bounded tool loop for complex questions |
 | `app.py`, `whatsapp/bot.py` | the two channels; both render only the `FinalResponse` |
+| `prompt_builder.py` + `backend/prompt_settings.py` | V8 workspace AI Instructions (response_style, data_format, bot_personality, company_context) layered UNDER the core rules; stored in `Workspace.settings["ai_instructions"]`; UI in `ui/settings.py`; scope follows `memory.set_scope` |
+| `entities.py` | safe fuzzy entity matching for filter values (exact → single close → ambiguous chips → none); `AmbiguousValue` is turned into a choice by `analyst` |
+| `pivot.py` | cross-tab presentation of 2-key / 1-measure aggregates ("month wise sales by city", "sales person vs month"); `understanding.cross_tab` reads the two axes |
+| `exports.py` | one deterministic `ResultExport` → CSV / XLSX / PDF (dependency-free PDF writer); UI has a PDF button |
+| `result_check.py` | last gate in `analyst._done`: plan columns/sheet vs schema, ordered dates, finite numbers — else a clear error, never a figure |
+| `rag/` | optional hybrid RAG (`RAG_ENABLED=false` default): chunking (PDF pages / sections) → embeddings (hash offline / openrouter / sentence_transformers) → BM25 + cosine (RRF) → top-k with citations; `mcp_server.search_text` uses it; `agent.classify` routes MCP+RAG hybrids to the agent |
 
 ## 3. Rules (do not break)
 - Generic: no business column names hardcoded. Never guess a number; ask (chips) when ambiguous.
+- Workspace AI instructions only shape context/presentation: `prompt_builder.validate` rejects override attempts; planner gets company_context only; wording models get style/format/personality; validation/grounding/tools run in code regardless.
+- RAG never computes totals: data questions stay on the tools even with documents connected; `rag.hits_any` + `semantics.knowledge_words` decide a hybrid (agent) only when the non-data words hit a document.
+- Fuzzy matching is for filter VALUES only (never metrics); a tie asks, a clear single match is used and reported in `resolved_filters`.
 - Dates: only `periods.py`. "last month" = previous calendar month; "last N months" = N calendar months ending today.
 - Follow-ups modify the previous state; "total kar ke batao" collapses, it never restarts.
 - One UI render per message; debug material only with the sidebar toggle.
@@ -46,11 +55,17 @@ point `memory.MEMORY_FILE` elsewhere — never leave test mappings in it.
 - WhatsApp media sends fail on the OpenWA server (whatsapp-web.js engine) → links are sent instead (see README troubleshooting).
 - `chat_bot/` is an unrelated nested git clone (empty) sitting in the repo root — untracked; remove or move.
 
+## 6b. V8 (2026-09-28) — what was added and how to extend
+- Spec §23 questions are covered offline in `tests/test_v8_features.py` (prompt builder, protection, fuzzy, pivot, images, exports, channel, result check, RAG off/on, hybrid agent, index persistence).
+- WhatsApp: `prompt_builder.set_channel("whatsapp")` in `bot.ask`; `whatsapp/format.result_list` lists grouped results whose value column carries the measure name.
+- Real sheet offline check (2026-09-28): "sales ka total" = scalar SALES/AMOUNT; "sales amount category wise" = CATEGORY × SUM(AMOUNT) (40 rows); "inventory closing stock" = INVENTORY/CLOSING STOCK; "September ki sales" switches back to SALES and asks TIMESTAMP vs VOUCHER DATE once.
+- Not done: RAG UI toggle (env only), stacked charts for pivots (table only), agent-side citations are the passages it retrieved (not per-sentence).
+
 ## 7. Testing pattern
 - Offline, no LLM: `monkeypatch.setattr(analyst, "OpenRouterAI", NoLLM)` (planner/wording raise if called), fixed
   reference date via `monkeypatch.setattr("understanding.date", date)` **and** `monkeypatch.setattr("periods.date", date)`.
 - Planner-path tests use a fake planner class returning a fixed plan (`tests/test_multi_metric.py::planner`).
-- Run: `.venv/bin/python -m pytest tests -q -p no:cacheprovider -W ignore` (255 pass, 16 live tests skipped).
+- Run: `.venv/bin/python -m pytest tests -q -p no:cacheprovider -W ignore` (282 pass, 16 live tests skipped).
 - Backend tests: `platform` fixture in `tests/test_backend.py` (in-memory DB via `db.configure("sqlite://")`, `DATA_DIR` in tmp, `APP_SECRET_KEY` set). UI: `APP_AUTH_MODE=none` for `AppTest`.
 - Real sheet offline check: register the sheet with `MCPServer().register_google_sheet` and run the conversation with NoLLM
   (see `tests/test_periods_context.py::test_acceptance_conversation` for the exact turns).

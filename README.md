@@ -242,10 +242,22 @@ user (web / WhatsApp)
 
 ### Tests
 ```bash
-.venv/bin/python -m pytest tests                 # 255 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
+.venv/bin/python -m pytest tests                 # 282 offline tests: 7 unrelated schemas, agent loop with a scripted LLM, WhatsApp, security
 RUN_LIVE=1 .venv/bin/python -m pytest tests/test_live_analyst.py    # real LLM incl. multi-source agent case
 .venv/bin/python tests/golden_real_sheet.py      # 34 golden questions on the real sheet + website, incl. a cross-sheet agent case
 ```
+
+## V8 — Prompt Builder, safe entity matching, pivots, exports, optional RAG (2026-09-28)
+
+- **AI Instructions (Settings → Prompt Builder):** per-workspace *Response style*, *Data format*, *Bot personality*, *Company context* with edit / save / reset / preview / validation / character limits. Hierarchy: core rules → schema → company context → style → format → personality → question. Instructions shape tone and presentation only; metric, grouping, filters, dates, source and every number are still decided and validated in code (`prompt_builder.py`, `backend/prompt_settings.py`).
+- **Structured-data protection:** "sales amount category wise batao" → SALES · CATEGORY · SUM(AMOUNT); a missing AMOUNT is a clear message, never QTY/RATE; a column spelled out in the question ("closing stock") wins over siblings of the same kind.
+- **Safe fuzzy entities:** "Pranjli ji" → "Pranjali Ji" (reported in `resolved_filters`); "Pranjal" ≈ two names → chips; nothing close → normal no-data error. Filter values only, never metrics (`entities.py`).
+- **Pivot / cross-tab:** "month wise sales by city", "sales person vs month", "category vs region" → rows × columns of one measure with Total row/column; periods stay chronological; a normal table is never forced into a pivot (`pivot.py`).
+- **Image / entity results:** rows with an image-like column (image, image_url, photo, thumbnail…) holding real http(s) links show the pictures when asked ("images dikhao"); never for numeric analysis.
+- **Exports:** `exports.ResultExport` — one deterministic representation → CSV, XLSX (Summary + Data) and PDF (dependency-free), always from the validated result. Web UI: ⬇️ CSV / Excel / PDF.
+- **Channel-aware presentation:** WhatsApp gets short lines and numbered lists; the numbers are identical to the web.
+- **Result validation:** `result_check.py` re-checks every data answer's plan against the schema (sheet, metric, group/filter/date columns, ordered dates, finite numbers) — a failure becomes a clear error, never a fabricated figure.
+- **Optional hybrid RAG (`RAG_ENABLED=false` by default):** documents / websites → chunks with page/section → embeddings (offline hash by default, OpenRouter or sentence-transformers optional) → BM25 + cosine fusion → `RAG_TOP_K` chunks with source/page/score → LLM; code appends `📄 Source: Return_Policy.pdf, Page 4`. No relevant chunk → a plain "not found", no model call. Data questions never touch RAG; mixed questions ("September sales aur return policy ke according…") run through the agent with `aggregate_data` + `search_text`. Config in `.env.example`.
 
 ## Canonical periods & conversational follow-ups (2026-09-27)
 

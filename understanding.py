@@ -20,6 +20,8 @@ def parse_period(question, today=None):
 GRAIN_WORDS = [("day", r"\b(day|days|daily|din|date wise|date-wise|datewise|roz|dainik|har din)\b"),
                ("month", r"\b(month wise|month-wise|monthwise|monthly|mahin\w*|maheen\w*|har month|per month|month by month|masik)\b"),
                ("year", r"\b(year wise|year-wise|yearly|saal wise|har saal|annual)\b")]
+POSTFIX_GROUP = {stem(w) for w in ("wise", "hisaab", "hisab", "anusar", "vaar", "war")}     # "<dimension> wise"
+PREFIX_GROUP = {stem(w) for w in ("per", "by", "each", "every", "har")}                      # "per <dimension>"
 FOLLOW_ADD = re.compile(r"\b(bhi|also|too|as well|add|jodo|jod do|include|saath mein|ke saath|plus)\b", re.I)
 FOLLOW_TOP = re.compile(r"\b(top|bottom|sabh? ?se (?:zyada|jada|jyada|kam|bad[ae]|chhot[ae]|bekar|achch?h[ae]|kharab)|highest|lowest|best|worst|least|minimum|maximum)\s*(\d{1,3})?\b", re.I)
 LOW_WORDS = re.compile(r"\b(kam|lowest|least|minimum|min|bottom|worst|bekar|kharab|chhot[ae]|neech?e|niche|ghatiya|smallest)\b", re.I)
@@ -86,19 +88,57 @@ def mentioned_dimension(question, columns, measures=()):
         full = [d for d in full if not ({stem(t) for t in tokens(d)} & ITEM_LIKE)]
     if full:
         return full[0]
-    for d in partial:      # "sales wise" → SALES PERSON; "month wise total sales" → the grouping word belongs to month, not sales
+    # A partial name needs its own grouping word: "sales wise" / "per salesman" — not "month wise sales" (wise belongs to
+    # month), not "sales by city" (by belongs to city), not "sales ka total" (possessive).
+    def grouped(i):
+        return (i + 1 < len(toks) and toks[i + 1] in POSTFIX_GROUP) or (i > 0 and toks[i - 1] in PREFIX_GROUP)
+    for d in partial:      # "sales wise" → SALES PERSON
         mt = {stem(t) for t in tokens(d)}
-        if any(toks[i] in mt and ((i + 1 < len(toks) and toks[i + 1] in GROUP_STEMS) or (i > 0 and toks[i - 1] in GROUP_STEMS)) for i in range(len(toks))):
+        if any(toks[i] in mt and grouped(i) for i in range(len(toks))):
             return d
     if grouping:           # "customer wise" on a table whose column is PARTY NAME: the entity synonyms decide
         from semantics import dimension_for_entity
         for i, t in enumerate(toks):
             ent = _SYN_OF.get(t)
-            if ent and ((i + 1 < len(toks) and toks[i + 1] in GROUP_STEMS) or (i > 0 and toks[i - 1] in GROUP_STEMS)):
+            if ent and grouped(i):
                 d = dimension_for_entity(ent, columns)
                 if d is not None:
                     return d["name"]
     return None
+
+
+CROSS_CUE = re.compile(r"\b(vs\.?|versus|cross\s*-?\s*tab|crosstab|pivot|matrix)\b|\bwise\b.*\bby\b|\bby\b.*\bwise\b", re.I)
+
+
+def cross_tab(question, columns):
+    """A two-axis request ("month wise sales by city", "sales person vs month", "category vs region"):
+    ([dimension columns], grain) — up to two real dimensions, or one dimension plus a time grain. ([], None) otherwise.
+    Only real schema columns (full/partial names or entity synonyms); nothing is invented."""
+    q = str(question or "")
+    if not CROSS_CUE.search(q):
+        return [], None
+    full, partial = dimension_matches(q, columns)
+    from semantics import MONEY_WORDS, QUANTITY_WORDS, dimension_for_entity
+    measure_s = {stem(w) for w in MONEY_WORDS | QUANTITY_WORDS}
+    toks = [stem(t) for t in tokens(q)]
+    partial = [d for d in partial if not ({stem(t) for t in tokens(d)} & set(toks)) <= measure_s]     # "sales" in "sales by city" is the measure
+    dims = list(dict.fromkeys(full + partial))
+    for t in toks:
+        ent = _SYN_OF.get(t)
+        if ent:
+            d = dimension_for_entity(ent, columns)
+            if d is not None and d["name"] not in dims:
+                dims.append(d["name"])
+    grain = wants_grain(q) or next((g for g, pat in (("month", r"\b(months?|mahin\w*|maheen\w*)\b"), ("year", r"\b(years?|saal)\b"), ("day", r"\b(days?|dates?|din)\b"))
+                                    if re.search(pat, q, re.I)), None)
+    def position(d):        # "category vs city" → CATEGORY rows, CITY columns: the order the user said them
+        dt = {stem(t) for t in tokens(d)} - {"name", "no", "id", "code"}
+        return next((i for i, t in enumerate(toks) if t in dt or _SYN_OF.get(t) and dimension_for_entity(_SYN_OF[t], columns) is not None and dimension_for_entity(_SYN_OF[t], columns)["name"] == d), 99)
+    dims = sorted(dims, key=lambda d: (d not in full, position(d)))      # spelled-out columns first, then in the order said
+    dims = dims[:1] if grain else dims[:2]
+    if (grain and len(dims) == 1) or (not grain and len(dims) == 2):
+        return dims, grain
+    return [], None
 
 
 def understand(question, columns, state=None, today=None):
@@ -117,6 +157,10 @@ def understand(question, columns, state=None, today=None):
     period = parse_period(q, today)
     grain = wants_grain(q, period)
     dim = mentioned_dimension(q, columns, measures)
+    cross_dims, cross_grain = cross_tab(q, columns)
+    if cross_dims:                       # two axes → both become grouping keys (pivot presentation decided later)
+        grain = grain or cross_grain
+        dim = cross_dims
     tops = list(FOLLOW_TOP.finditer(q))
     loose = re.search(r"(?<![\d-])(\d{1,3})(?![\d-])", q) if tops and not any(t.group(2) for t in tops) and not parse_period(q, today) else None
     top = next((t for t in tops if t.group(2)), None) or next((t for t in tops if re.match(r"(top|bottom)", t.group(0), re.I)), None) or (tops[0] if loose else None)
@@ -141,7 +185,7 @@ def understand(question, columns, state=None, today=None):
     same_metric = not measures or [{k: v for k, v in m.items() if k != "column_hint"} for m in measures] == [{k: v for k, v in m.items() if k not in ("column_hint", "aggregation")} for m in (state.get("metrics") or [])]
     collapse = bool(state) and not additive and bool(COLLAPSE.search(q)) and not grain and not dim and not period and not top_n and same_metric
     concise = collapse and bool(ONLY.search(q))
-    intent = {"question": q, "metrics": measures, "new_metrics": list(measures), "period": period, "grain": grain, "group_by": [dim] if dim else [], "top_n": top_n,
+    intent = {"question": q, "metrics": measures, "new_metrics": list(measures), "period": period, "grain": grain, "group_by": (list(dim) if isinstance(dim, list) else [dim]) if dim else [], "top_n": top_n,
               "sort": ("asc" if low else "desc") if top else None, "direction_said": bool(low or HIGH_WORDS.search(q)),
               "additive": additive, "correction": correction, "report": bool(REPORT_Q.search(q)) and not measures,
               "detail": bool(DRILL_Q.search(q) or SHOW_ITEMS.search(q)), "kind": None,
@@ -167,7 +211,7 @@ def understand(question, columns, state=None, today=None):
         if grain:
             merged["grain"] = grain
         if dim:
-            merged["group_by"] = [dim]
+            merged["group_by"] = list(dim) if isinstance(dim, list) else [dim]
             if not top_n:
                 merged["top_n"], merged["sort"] = None, None       # "customer wise" after "top 5 …" means all customers
             if not grain and not period:

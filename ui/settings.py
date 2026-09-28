@@ -18,6 +18,52 @@ def load_prefs(user, workspace_id):
     return st.session_state.prefs
 
 
+def prompt_builder_section(user, workspace_id):
+    """AI Instructions (Prompt Builder): workspace-level style / format / personality / company context.
+    Edit · Save · Reset · Preview, with validation and character limits. Data rules are not editable here."""
+    import prompt_builder
+    from backend import prompt_settings
+    st.markdown("**AI Instructions (Prompt Builder)**")
+    st.caption("Ye instructions jawab ka andaaz aur company ki terminology tay karti hain — data, columns, filters, dates aur numbers hamesha "
+               "validated tools se aate hain; inhe koi instruction badal nahi sakti. Poore workspace (web + WhatsApp) par lagti hain.")
+    if "ai_instructions" not in st.session_state:
+        st.session_state.ai_instructions = prompt_settings.get(workspace_id)
+    ins = st.session_state.ai_instructions
+    for k in prompt_builder.FIELDS:
+        limit = prompt_builder.MAX_CHARS[k]
+        ins[k] = st.text_area(prompt_builder.LABELS[k], value=ins.get(k, ""), max_chars=limit, height=110, key=f"pb_{k}",
+                              placeholder=prompt_builder.EXAMPLES[k], help=f"Max {limit} characters. Example: {prompt_builder.EXAMPLES[k][:120]}…")
+        st.caption(f"{len(ins[k])}/{limit}")
+    check = prompt_builder.validate(ins)
+    for e in check["errors"]:
+        st.error(e)
+    for w in check["warnings"]:
+        st.warning(w)
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Save instructions", type="primary", disabled=not check["ok"], key="pb_save"):
+        try:
+            st.session_state.ai_instructions = prompt_settings.save(workspace_id, user["user_id"], ins)
+            st.success("Saved — ab har jawab (web + WhatsApp) in instructions ke saath banega.")
+        except (ValueError, PermissionError) as e:
+            st.error(str(e))
+    if c2.button("Reset to default", key="pb_reset"):
+        st.session_state.ai_instructions = prompt_settings.reset(workspace_id, user["user_id"])
+        for k in prompt_builder.FIELDS:
+            st.session_state.pop(f"pb_{k}", None)
+        st.rerun()
+    if c3.button("Use examples", key="pb_examples", help="Example text bhar do; phir edit karke save karo"):
+        st.session_state.ai_instructions = dict(prompt_builder.EXAMPLES)
+        for k in prompt_builder.FIELDS:
+            st.session_state.pop(f"pb_{k}", None)
+        st.rerun()
+    with st.expander("Preview: effective prompt structure", expanded=False):
+        try:
+            schemas = {s["id"]: {**(s.get("schema_snapshot") or {}), "name": s["name"]} for s in shell.REGISTRY.list(workspace_id, include_disabled=False) if s["status"] == "connected"}
+        except Exception:
+            schemas = None
+        st.code(prompt_builder.preview(check["clean"], schemas), language="text")
+
+
 def page():
     shell.styles()
     user, workspace_id = shell.current()
@@ -65,6 +111,8 @@ def page():
     if st.button("Generate link code"):
         code = whatsapp_link.create_code(workspace_id, user["user_id"])
         st.success(f"WhatsApp par bot ko bhejo:  `/link {code}`  (code 24 ghante valid hai)")
+
+    prompt_builder_section(user, workspace_id)
 
     if os.getenv("APP_ALLOW_MODEL_OVERRIDE", "").lower() in ("1", "true", "yes"):
         st.markdown("**Model**")

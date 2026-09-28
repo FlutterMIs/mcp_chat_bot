@@ -211,6 +211,13 @@ def execute_state(conv, state, tools, question="", log=None):
     if not keys:
         return Reply(text, kind="answer", df=None, metric=measures[0]["column"], plan=plan, value=float(merged[measures[0]["label"]].iloc[0]) if len(merged) and len(measures) == 1 else None, cards=cards)
     chart = {"type": "line" if "period" in keys else "bar", "x": keys[0], "y": table_measures[0]["label"]} if len(merged) >= 2 else None
+    from pivot import describe, pivot_table, should_pivot
+    if should_pivot(keys, table_measures, merged, question) and not state.get("top_n"):
+        wide = pivot_table(merged, keys, table_measures[0]["label"])
+        text = describe(keys, table_measures[0]["label"], len(wide) - 1, len(wide.columns) - 2) + (f" Period: {period.get('label') or span}." if span else "") + f"\nCalculation: {how}."
+        if explain and period:
+            text += "\n" + describe_period(period, _ddmmyyyy)
+        return Reply(text, kind="answer", df=wide, chart=None, metric=table_measures[0]["column"], plan=plan, cards=cards, pivot=True, long_df=merged)
     return Reply(text, kind="answer", df=merged, chart=chart, metric=table_measures[0]["column"], plan=plan, cards=cards, drillable="period" if "period" in keys else None)
 
 
