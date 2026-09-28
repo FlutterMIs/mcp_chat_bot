@@ -90,6 +90,8 @@ def problems(reply, schemas):
     df = reply.df
     if df is not None and len(df) and plan.get("operation") in ("aggregate", "multi_metric"):      # raw rows may legitimately have blanks
         for c in df.columns:
+            if str(c).startswith("Previous ") or str(c) in ("Change", "Change %"):
+                continue                                                  # the first period has no previous value by definition
             if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c]):
                 s = pd.to_numeric(df[c], errors="coerce")
                 if s.isna().any() or not s.map(lambda v: math.isfinite(float(v))).all():

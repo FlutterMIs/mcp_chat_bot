@@ -163,6 +163,13 @@ def execute_state(conv, state, tools, question="", log=None):
     if state.get("share") and keys and rank_by is not None and len(full):
         tot = float(pd.to_numeric(full[rank_by["label"]], errors="coerce").sum())
         merged["Share %"] = (pd.to_numeric(merged[rank_by["label"]], errors="coerce") / tot * 100).round(2) if tot else 0.0
+    if state.get("mom") and keys == ["period"] and rank_by is not None and len(merged) >= 2:
+        # "… with difference / growth": previous period and change, computed here from the same rows
+        vals = pd.to_numeric(merged[rank_by["label"]], errors="coerce")
+        merged[f"Previous {rank_by['label']}"] = vals.shift(1)
+        merged["Change"] = (vals - vals.shift(1)).round(2)
+        merged["Change %"] = ((vals - vals.shift(1)) / vals.shift(1).replace(0, float("nan")) * 100).round(2)
+        full = merged.copy()
     cut = False
     if state.get("top_n") and keys and rank_scope:
         # TOP-N PER GROUP: rank inside each period / scope value, never sort-all + head.

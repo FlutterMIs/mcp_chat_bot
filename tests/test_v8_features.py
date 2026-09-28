@@ -194,7 +194,7 @@ def test_typo_entity_resolves_to_single_real_value_with_note(biz):
                   "filters": [{"column": "SALESMAN", "op": "eq", "value": "Pranjli ji"}]})
     analyst.OpenRouterAI = ai
     r, fr = ask(c, t, "Pranjli ji ki sales")
-    assert fr.shape == "scalar" and fr.value == 32000.0 and r.plan["filters"][0]["value"] == "Pranjli ji"
+    assert fr.shape == "scalar" and fr.value == 32000.0 and r.plan["filters"][0]["value"] == "Pranjali Ji"      # V9: resolved in code against real values, no planner
     res = srv.call_tool("aggregate_source", {"source_id": "biz", "sheet_name": "SALES", "metric": "AMOUNT", "filters": [{"column": "SALESMAN", "op": "contains", "value": "Pranjli ji"}]})
     assert res["rows"][0]["value"] == 32000 and res["resolved_filters"] == ['"Pranjli ji" → "Pranjali Ji" (SALESMAN)']
 

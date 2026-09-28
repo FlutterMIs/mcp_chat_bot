@@ -257,6 +257,7 @@ RUN_LIVE=1 .venv/bin/python -m pytest tests/test_live_analyst.py    # real LLM i
 - **Comparisons / share:** "this month vs last month", "pichhle month se kitna difference hai", "this year vs last year" → both totals + difference + % change computed in code; "category wise share" → Share % of the all-data total.
 - **Totals:** every grouped table carries a totals block — **Grand Total** (all data) or **Displayed Top N Total** (only the shown rows), never confused; UI shows the Total row and "Total Records".
 - **Charts:** built from the result DataFrame only, validated (`chart_check`): text fields never on a numeric axis; top-seller-by-month = month on X, amount on Y, seller as colour. Month labels display as Sep-26 while the data stays ISO.
+- **Entity filters without the LLM:** "jsp trader ki merko last 12 mnths ki sale dedo" → the typed name is matched against the real CUSTOMER NAME values in code (JSP TRADERS (HISAR)), the 12-month series is computed by the tools; "Pranjal ki sales" with two close names asks which one. Month series get Previous / Change / Change % columns when you ask for the difference.
 - **Golden question** ("bhai mujhe … date month wise … top saler usak sale amount … total items sale count") → one coherent table: Month · Sales Person · Sales Amount · Items Count, chronological, no ₹ on counts.
 
 ## V8 — Prompt Builder, safe entity matching, pivots, exports, optional RAG (2026-09-28)

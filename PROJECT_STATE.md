@@ -68,7 +68,8 @@ point `memory.MEMORY_FILE` elsewhere — never leave test mappings in it.
 - `result_check`: top-N per scope ≤ N rows per scope value; displayed total must equal the table; grand total must equal displayed when nothing was cut.
 - Vocabulary (`semantics.py`): seller/saler/salesman → employee entity; state/category entities; "items sold" (`SOLD_CUES`) = quantity; "transaction count" = distinct invoice/voucher id, else row count (`Transaction Count`).
 - Real sheet offline: the golden question ("… date mont wise … top saler usak sale amount … total items sale count") → asks TIMESTAMP vs VOUCHER DATE once → Apr–Sep top seller per month with Sales Amount + Items Count, no ₹ on items.
-- Tests: `tests/test_v9_analytics.py` (spec items 1-25 + sequences A/B/C + result-check rules).
+- `entity_filter.py` (V9.1): entity words ("jsp trader ki …", "Dilip ki sales", "Delhi ki sales") are matched in code against the REAL distinct values of the table's dimension columns (`distinct_values` tool + `entities.match_entity`) BEFORE the planner — one clear match → a filter on the deterministic path, a tie → chips, nothing → planner as before. "kon kon … karta hai" (row lists) still goes to the planner. Month series can carry `Previous …`, `Change`, `Change %` columns when the question says difference/growth (`state["mom"]`).
+- Tests: `tests/test_v9_analytics.py` (spec items 1-25 + sequences A/B/C + result-check rules + entity filters).
 
 ## 7. Testing pattern
 - Offline, no LLM: `monkeypatch.setattr(analyst, "OpenRouterAI", NoLLM)` (planner/wording raise if called), fixed

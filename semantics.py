@@ -359,7 +359,7 @@ def only_known_words(question, columns, sheet_names=None):
                                            "tell", "want", "need", "please", "ok", "okay", "haan", "nahi", "nhi", "ki", "ka", "ke", "wala", "vale", "hi", "to", "toh", "na",
                                            "add", "jodo", "jod", "include", "plus", "saath", "sath", "too", "also", "as", "well", "remove", "hatao", "hata", "without", "bina", "sirf",
                                            "vs", "versus", "cross", "crosstab", "pivot", "matrix", "by",
-                                           "sir", "ji", "esa", "aisa", "kuchh", "kuch", "chaiye", "chahiye", "moka", "mauka", "usak", "uska", "usme", "usmein", "mujhe", "fir", "phir",
+                                           "sir", "ji", "esa", "aisa", "kuchh", "kuch", "chaiye", "chahiye", "moka", "mauka", "usak", "uska", "usme", "usmein", "mujhe", "fir", "phir", "merko", "mereko", "muje", "dedo", "batado", "bhejo", "send",
                                            "no", "number", "one", "compare", "comparison", "difference", "farak", "fark", "antar", "share", "percentage", "percent", "hissa", "contribution")}
         import calendar
         KNOWN_WORDS |= {stem(w) for w in ("month", "months", "mahina", "mahine", "maheena", "maheene", "monthly", "day", "days", "din", "daily", "week", "weeks", "hafta", "hafte", "weekly",

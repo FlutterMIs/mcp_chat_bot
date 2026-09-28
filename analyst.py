@@ -681,8 +681,29 @@ def understood_reply(conv, question, tools, log):
             conv._asked_for = question
             return _ask(conv, log, "table", "Ye kis sheet se chahiye — " + " ya ".join(n for _, n, _ in rivals) + "?",
                         [{"label": f"{n} sheet", "table": [sid, n]} for sid, n, _ in rivals])
-    intent = understand(question, cols, state)
-    gate = ambiguity_gate(conv, question, cols, intent, state, log, pick if not state else None)
+    # Entity words ("jsp trader ki …", "Pranjli ji ki …") are matched against the REAL values of the table's dimension
+    # columns before anything else: one clear match becomes a filter, a tie is asked, nothing close → the planner.
+    from entity_filter import find_entity_filter, merge_filters, strip_span
+    from entities import AmbiguousValue
+    sheet_names = [t.get("name") for sch in conv.schemas.values() for t in sch.get("sheets") or [] if t.get("name")]
+    ent_sid = state.get("source_id") if state else (pick[0] if pick else None)
+    ent_table = table if state else (pick[2] if pick else None)
+    entity, q_intent = None, question
+    from understanding import SHOW_ITEMS
+    if ent_sid and ent_table and not only_known_words(question, cols, sheet_names) and not SHOW_ITEMS.search(question):   # "kon kon … karta hai" lists rows: the planner's job
+        try:
+            entity = find_entity_filter(question, ent_sid, ent_table, tools, sheet_names)
+        except AmbiguousValue as e:
+            conv._asked_for = question
+            opts = [{"label": v, "choice": None, "rewrite": _replace_value(question, e.typed, re.sub(r"\s*\([^()]*\)$", "", v) if e.column == "naam" else v)} for v in e.candidates]
+            return _ask(conv, log, "entity:" + str(e.column), f"“{e.typed}” se aapka matlab kaun sa {e.column} hai?", opts)
+        if entity:
+            q_intent = strip_span(question, entity["typed"])
+            log("entity_filter", column=entity["column"], value=entity["value"], typed=entity["typed"])
+    intent = understand(q_intent, cols, state)
+    if entity:
+        intent["entity_filter"] = entity
+    gate = ambiguity_gate(conv, q_intent, cols, intent, state, log, pick if not state else None)
     if gate is not None:
         return gate
     if intent["kind"] == "report" and state and conv.last_result is not None:
@@ -690,28 +711,29 @@ def understood_reply(conv, question, tools, log):
         log("report_built", rows=len(conv.last_result))
         return Reply(f"📄 Report taiyar hai: *{name}* — summary (source, date range, calculation, totals) + data sheet.", kind="report",
                      files=[{"name": name, "bytes": data, "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}], df=conv.last_result, plan=conv.last_plan)
-    metric_swap = bool(intent["metrics"]) and intent["metrics"] != (state.get("metrics") or []) and only_known_words(question, cols)
+    metric_swap = bool(intent["metrics"]) and intent["metrics"] != (state.get("metrics") or []) and only_known_words(q_intent, cols)
+    filters = merge_filters(state.get("filters"), entity) if entity else list(state.get("filters") or [])
     if state and intent.get("collapse"):
         # SERIES → TOTAL ("total kar ke batao", "only total"): same source, period, filters and metric; one number, no split.
         new_state = {**state, "period": intent["period"] or {}, "grain": None, "group_by": [], "metrics": intent["metrics"] or state.get("metrics") or [],
-                     "top_n": None, "sort": None, "concise": intent.get("concise"), "explain_period": intent.get("explain_period")}
+                     "top_n": None, "sort": None, "concise": intent.get("concise"), "explain_period": intent.get("explain_period"), "filters": filters}
         log("route_state", kind="collapse", metrics=len(new_state["metrics"]), grain=None, group_by=[])
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
-    if state and intent["kind"] in ("analysis", "drill") and not only_known_words(question, cols) and not intent.get("explain_period"):
+    if state and intent["kind"] in ("analysis", "drill") and not only_known_words(q_intent, cols) and not intent.get("explain_period"):
         log("route_planner", reason="unknown words — may be a filter value")     # "Code-1032 ka item kaun leta hai": filters are the planner's job
         return None
-    if intent["kind"] in ("analysis", "drill") and state and (intent["additive"] or intent["correction"] or intent["kind"] == "drill" or intent.get("period") or intent.get("grain") or intent.get("group_by") or intent.get("top_n") or metric_swap):
+    if intent["kind"] in ("analysis", "drill") and state and (intent["additive"] or intent["correction"] or intent["kind"] == "drill" or intent.get("period") or intent.get("grain") or intent.get("group_by") or intent.get("top_n") or metric_swap or entity):
         grain = intent["grain"] or (((intent["period"] or {}).get("grain")) if not intent["group_by"] else None)     # "last 12 months" carries month grain
         new_state = {**state, "period": intent["period"] or {}, "grain": grain, "group_by": intent["group_by"], "metrics": intent["metrics"] or state.get("metrics") or [],
                      "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period"),
-                     "rank_scope": intent.get("rank_scope"), "share": intent.get("share")}
+                     "rank_scope": intent.get("rank_scope"), "share": intent.get("share"), "mom": intent.get("mom"), "filters": filters}
         log("route_state", kind=intent["kind"], metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"], rank_scope=new_state["rank_scope"], confidence=intent.get("confidence"))
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
     from semantics import value_words
-    if intent["kind"] == "analysis" and not state and intent["metrics"] and value_words(question, cols):
+    if intent["kind"] == "analysis" and not state and intent["metrics"] and value_words(q_intent, cols) and not entity:
         log("route_planner", reason="value words — a filter the planner must apply")     # "Acme ka last 2 months sale"
         return None
-    if intent["kind"] == "analysis" and not state and intent["metrics"] and (intent["period"] or intent["grain"] or intent["group_by"] or _settled_choice(conv, intent) or only_known_words(question, cols, [t.get("name") for s in conv.schemas.values() for t in s.get("sheets") or []])):
+    if intent["kind"] == "analysis" and not state and intent["metrics"] and (intent["period"] or intent["grain"] or intent["group_by"] or _settled_choice(conv, intent) or only_known_words(q_intent, cols, sheet_names)):
         # A plain total ("total items sold") runs here too, but only when every word is understood — an unknown
         # word may be a filter value, and filters are the planner's job.
         # Fresh analysis: only when the table and date column are unambiguous — otherwise the planner decides.
@@ -731,8 +753,8 @@ def understood_reply(conv, question, tools, log):
             return None
         new_state = {"source_id": sid, "sheet_name": sheet, "date_column": date_col if isinstance(date_col, str) else None, "period": intent["period"] or {},
                      "grain": intent["grain"] or ((intent["period"] or {}).get("grain") if not intent["group_by"] else None), "group_by": intent["group_by"],
-                     "metrics": intent["metrics"], "filters": [], "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period"),
-                     "rank_scope": intent.get("rank_scope"), "share": intent.get("share")}
+                     "metrics": intent["metrics"], "filters": filters, "top_n": intent.get("top_n"), "sort": intent.get("sort"), "explain_period": intent.get("explain_period"),
+                     "rank_scope": intent.get("rank_scope"), "share": intent.get("share"), "mom": intent.get("mom")}
         log("route_state", kind="fresh", metrics=len(new_state["metrics"]), grain=new_state["grain"], group_by=new_state["group_by"], rank_scope=new_state["rank_scope"], confidence=intent.get("confidence"))
         return _remember(conv, execute_state(conv, new_state, tools, question, log))
     return None

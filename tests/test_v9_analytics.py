@@ -273,7 +273,14 @@ def test_19_20_grand_total_vs_displayed_top_n_total(biz):
     # planner path (LLM plan with top_n) carries the same distinction from grand_total_all_groups
     analyst.OpenRouterAI = planner({"status": "execute", "mode": "data", "source_id": "biz", "sheet_name": "SALES", "operation": "aggregate", "metric": "AMOUNT", "aggregation": "sum",
                                     "group_by": ["CUSTOMER NAME"], "sort": "desc", "top_n": 1, "filters": [{"column": "STATE", "op": "eq", "value": "Delhi"}]})
-    r, fr = ask(Conversation(schemas=c.schemas), t, "Delhi ka top party by amount")        # a value filter → the planner path (Delhi has 2 customers; top 1 is a cut)
+    import entity_filter
+    monkeypatch_none = lambda *a, **k: None
+    orig = entity_filter.find_entity_filter
+    entity_filter.find_entity_filter = monkeypatch_none                                       # force the planner path for this check
+    try:
+        r, fr = ask(Conversation(schemas=c.schemas), t, "Delhi ka top party by amount")     # (Delhi has 2 customers; top 1 is a cut)
+    finally:
+        entity_filter.find_entity_filter = orig
     delhi = float(SALES[SALES["STATE"] == "Delhi"]["AMOUNT"].sum())
     assert r.plan["operation"] == "aggregate" and fr.totals["cut"] and fr.totals["all"]["AMOUNT"] == delhi and fr.totals["displayed"]["AMOUNT"] == float(fr.table["value"].sum()) < delhi
 
@@ -343,3 +350,31 @@ def test_23_24_25_rag_only_mcp_only_hybrid(biz):
         assert "📄 Source: Return_Policy.pdf, Page 4" in fr.answer and seen["r"]["chunks"][0]["page"] == 4
     finally:
         rag.configure()
+
+
+# ---------------------------------------------------------------- V9.1 entity filters in code (screenshot: "jsp trader ki merko last 12 mnths ki sale dedo")
+def test_entity_filter_resolves_typed_customer_without_the_planner(monkeypatch, tmp_path):
+    monkeypatch.setattr(memory, "MEMORY_FILE", tmp_path / "m.json")
+    monkeypatch.setattr(analyst, "OpenRouterAI", NoLLM)
+    monkeypatch.setattr("understanding.date", date)
+    monkeypatch.setattr("periods.date", date)
+    s2 = SALES.copy()
+    s2.loc[s2["CUSTOMER NAME"] == "Acme", "CUSTOMER NAME"] = "JSP TRADERS (HISAR)"
+    srv = make_source("s", s={"SALES": s2, "INVENTORY": INVENTORY[["ITEM", "CLOSING STOCK"]]})
+    c, t = Conversation(schemas=schemas_of(srv)), LocalTools(srv)
+    r, fr = ask(c, t, "jsp trader ki merko last 12 mnths ki sale dedo")
+    jsp = s2[s2["CUSTOMER NAME"] == "JSP TRADERS (HISAR)"]
+    assert fr.kind == "answer" and fr.shape == "series" and r.plan["filters"] == [{"column": "CUSTOMER NAME", "op": "eq", "value": "JSP TRADERS (HISAR)"}]
+    assert len(fr.table) == 12 and list(fr.table["period"])[:2] == ["2025-10", "2025-11"] and float(fr.table["AMOUNT"].sum()) == float(jsp["AMOUNT"].sum())
+    r, fr = ask(c, t, "total kar ke batao")
+    assert fr.value == float(jsp["AMOUNT"].sum()) and r.plan["filters"][0]["value"] == "JSP TRADERS (HISAR)"      # the entity stays in the follow-up
+    r, fr = ask(c, t, "month wise sales with difference")
+    assert {"Previous AMOUNT", "Change", "Change %"} <= set(fr.table.columns) and fr.table["Change"].iloc[-1] == fr.table["AMOUNT"].iloc[-1] - fr.table["AMOUNT"].iloc[-2]
+    r, fr = ask(Conversation(schemas=c.schemas), t, "Pranjal ki sales batao")
+    assert fr.kind == "clarify" and set(fr.options) == {"Pranjal Traders (CUSTOMER NAME)", "Pranjali Ji (SALES PERSON)"}    # a customer AND a salesperson fit → ask
+    r, fr = ask(c, t, "Pranjal Traders")
+    assert fr.kind == "answer" and r.plan["filters"] == [{"column": "CUSTOMER NAME", "op": "eq", "value": "Pranjal Traders"}]
+    r, fr = ask(Conversation(schemas=c.schemas), t, "Delhi ki sales")
+    assert fr.value == float(s2[s2["STATE"] == "Delhi"]["AMOUNT"].sum())
+    with pytest.raises(AssertionError, match="planner"):                        # "kon kon … karta hai" is a row list → planner
+        ask(Conversation(schemas=c.schemas), t, "Item0 kon kon kharidta hai")

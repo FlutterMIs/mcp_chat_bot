@@ -286,6 +286,7 @@ def understand(question, columns, state=None, today=None):
                       "periods": [{"label": a["label"], "start": a["from"], "end": a["to"]} for a in asks]}
         else:
             compare = False
+    mom = bool(COMPARE_CUE.search(q)) and bool(grain)          # "month wise sales with difference": previous period + change columns
     share = bool(SHARE_CUE.search(q)) and bool(dim)
     if share and not measures and not state:
         measures = [{"kind": "monetary", "entity": None, "column_hint": None, "implicit": True}]      # "category wise share" = share of the money column
@@ -297,7 +298,7 @@ def understand(question, columns, state=None, today=None):
               "sort": ("asc" if low else "desc") if top else None, "direction_said": bool(low or HIGH_WORDS.search(q)), "rank_scope": rank_scope,
               "additive": additive, "correction": correction, "report": bool(REPORT_Q.search(q)) and not measures,
               "detail": bool(DRILL_Q.search(q) or SHOW_ITEMS.search(q)), "kind": None,
-              "collapse": collapse, "concise": concise, "explain_period": explain, "compare": compare, "share": share, "confidence": confidence}
+              "collapse": collapse, "concise": concise, "explain_period": explain, "compare": compare, "share": share, "mom": mom, "confidence": confidence}
     if intent["report"] and state:
         intent["kind"] = "report"
         return intent
